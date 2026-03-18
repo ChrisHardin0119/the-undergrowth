@@ -1905,3 +1905,35 @@ button, .btn, [role="button"] {
   0%, 100% { text-shadow: 0 0 4px #fbbf24; }
   50% { text-shadow: 0 0 10px #fbbf24, 0 0 20px #f59e0b; }
 }
+
+/* ============================================
+   ENEMY HP BARS (in viewport)
+   ============================================ */
+.tile-enemy {
+  position: relative;
+}
+
+.enemy-hp-bar {
+  position: absolute;
+  bottom: 1px;
+  left: 10%;
+  width: 80%;
+  height: 2px;
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 1px;
+  overflow: hidden;
+}
+
+.enemy-hp-fill {
+  height: 100%;
+  border-radius: 1px;
+  transition: width 0.2s ease;
+}
+
+/* Stairs descent button in action bar */
+.stairs-action-btn {
+  background: rgba(255, 255, 0, 0.15) !important;
+  border-color: #fbbf24 !important;
+  color: #fbbf24 !important;
+  animation: stairs-blink 1.5s ease-in-out infinite;
+}

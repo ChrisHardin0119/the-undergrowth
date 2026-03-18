@@ -336,7 +336,6 @@ export function isWalkable(tile: Tile): boolean {
   return (
     tile === Tile.Floor ||
     tile === Tile.StairsDown ||
-    tile === Tile.Door ||
     tile === Tile.Water ||
     tile === Tile.Mushroom ||
     tile === Tile.Crystal ||
@@ -344,6 +343,8 @@ export function isWalkable(tile: Tile): boolean {
     tile === Tile.BoneFloor ||
     tile === Tile.AbyssFloor
   );
+  // Note: Door and Chest are NOT walkable by enemies
+  // Player handles Door (with key) and Chest (opens it) in processAction
 }
 
 // --- Check if a position is in bounds ---

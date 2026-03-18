@@ -463,6 +463,18 @@ export default function GamePage() {
           tileClass += ' tile-enemy';
           content = eDef?.icon || '?';
           if (eDef?.isBoss) tileClass += ' tile-boss';
+          // Enemy HP bar shown below
+          const eHpPct = Math.max(0, Math.min(100, (enemy.hp / enemy.maxHp) * 100));
+          const eHpColor = eHpPct > 60 ? '#ef4444' : eHpPct > 30 ? '#f97316' : '#fbbf24';
+          tileGrid.push(
+            <div key={`${vx}-${vy}`} className={tileClass}>
+              {content}
+              <div className="enemy-hp-bar">
+                <div className="enemy-hp-fill" style={{ width: `${eHpPct}%`, backgroundColor: eHpColor }} />
+              </div>
+            </div>
+          );
+          continue;
         } else if (item) {
           const iDef = getItemDef(item.defId);
           tileClass += ' tile-item';
@@ -634,6 +646,16 @@ export default function GamePage() {
           }} title="Wait (Space)">
             ⏳ WAIT
           </button>
+          {onStairs && (
+            <button className="action-btn stairs-action-btn" onClick={() => {
+              const newState = processAction(gameState, 'descend');
+              setGameState(newState);
+              collectDamageEvents();
+              if (soundEnabled) sfxDescend();
+            }} title="Descend (Enter)">
+              ▼ GO
+            </button>
+          )}
           <button className="action-btn" onClick={() => setScreen('help')} title="Help (H)">
             ❓ HELP
           </button>
