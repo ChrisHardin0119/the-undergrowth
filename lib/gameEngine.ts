@@ -6,7 +6,7 @@
 
 import {
   GameState, PlayerState, EnemyInstance, ItemInstance,
-  Direction, DIR_OFFSETS, Tile, LogEntry, StatusEffect, Pos, BiomeType,
+  Direction, DIR_OFFSETS, Tile, LogEntry, StatusEffect, Pos, BiomeType, DamageEvent,
 } from './types';
 import { generateFloor, findSpawnPos, findRandomWalkable, isWalkable, inBounds, rng, rngInt, pick } from './dungeon';
 import { getEnemyDef, getItemDef, getEnemiesForFloor, getBossForFloor, getItemsForFloor, scaleEnemyStats, ITEMS } from './entities';
@@ -19,9 +19,41 @@ function xpForLevel(level: number): number {
   return Math.floor(20 * Math.pow(level, 1.8));
 }
 
+// --- Meta cache: load once per turn cycle instead of every function call ---
+let _metaCache: ReturnType<typeof loadMeta> | null = null;
+let _metaCacheTurn: number = -1;
+
+function getCachedMeta(turnCount?: number): ReturnType<typeof loadMeta> {
+  if (_metaCache && turnCount !== undefined && turnCount === _metaCacheTurn) {
+    return _metaCache;
+  }
+  _metaCache = loadMeta();
+  if (turnCount !== undefined) _metaCacheTurn = turnCount;
+  return _metaCache;
+}
+
+export function invalidateMetaCache(): void {
+  _metaCache = null;
+  _metaCacheTurn = -1;
+}
+
+// --- Floating damage number events (ephemeral, not saved) ---
+let _damageEvents: DamageEvent[] = [];
+let _damageEventId = 0;
+
+function addDamageEvent(x: number, y: number, value: string, color: string) {
+  _damageEvents.push({ x, y, value, color, id: _damageEventId++ });
+}
+
+export function consumeDamageEvents(): DamageEvent[] {
+  const events = _damageEvents;
+  _damageEvents = [];
+  return events;
+}
+
 // --- Get view radius (base 7 + eagle eyes meta upgrade) ---
-function getViewRadius(): number {
-  const meta = loadMeta();
+function getViewRadius(turnCount?: number): number {
+  const meta = getCachedMeta(turnCount);
   return 7 + (meta.upgrades['eagle_eyes'] || 0);
 }
 
@@ -200,7 +232,7 @@ function spawnItems(floor: ReturnType<typeof generateFloor>, floorNum: number, o
     if (!pos) continue;
 
     // Weight by rarity (Lucky Find meta upgrade boosts rarer items)
-    const luckyFindLevel = loadMeta().upgrades['lucky_find'] || 0;
+    const luckyFindLevel = getCachedMeta().upgrades['lucky_find'] || 0;
     const luckBonus = 1 + luckyFindLevel * 0.2; // 20% better rarity per level
     const weights = available.map(it => {
       switch (it.rarity) {
@@ -219,6 +251,32 @@ function spawnItems(floor: ReturnType<typeof generateFloor>, floorNum: number, o
     }
 
     items.push({ defId: chosen.id, pos });
+  }
+
+  // Place keys on floors that have locked doors (floor 3+)
+  if (floorNum >= 3) {
+    // Check if this floor has any doors
+    let hasDoors = false;
+    for (let y = 0; y < floor.height && !hasDoors; y++) {
+      for (let x = 0; x < floor.width && !hasDoors; x++) {
+        if (floor.tiles[y][x] === Tile.Door) hasDoors = true;
+      }
+    }
+    if (hasDoors) {
+      // Determine which key to spawn based on floor
+      let keyId = 'cave_key';
+      if (floorNum >= 25) keyId = 'abyssal_key';
+      else if (floorNum >= 13) keyId = 'crystal_key';
+
+      // Spawn 1-2 keys (guaranteed at least 1 so player can progress)
+      const numKeys = rng() < 0.4 ? 2 : 1;
+      for (let ki = 0; ki < numKeys; ki++) {
+        const roomIdx = rngInt(0, Math.min(2, floor.rooms.length - 1));
+        const room = floor.rooms[roomIdx];
+        const pos = findSpawnPos(floor, room, [...occupied, ...items.filter(it => it.pos).map(it => it.pos!)]);
+        if (pos) items.push({ defId: keyId, pos });
+      }
+    }
   }
 
   // Always place at least one healing item on floor 1
@@ -293,6 +351,66 @@ export function processAction(state: GameState, direction: Direction): GameState
   // Wall — can't move
   if (tile === Tile.Wall) return state;
 
+  // Lava — impassable hazard
+  if (tile === Tile.Lava) {
+    log.push({ text: 'The lava is too hot to cross!', type: 'info', turn });
+    return state;
+  }
+
+  // Door — requires a key
+  if (tile === Tile.Door) {
+    if (state.player.keys > 0) {
+      // Unlock the door, consume a key, turn it into floor
+      const newTiles = state.floor.tiles.map(row => [...row]);
+      newTiles[newY][newX] = Tile.Floor;
+      newState.floor = { ...state.floor, tiles: newTiles };
+      newState.player = { ...state.player, keys: state.player.keys - 1 };
+      log.push({ text: '🔑 You unlock the door! (-1 key)', type: 'pickup', turn });
+    } else {
+      log.push({ text: '🚪 This door is locked. You need a key!', type: 'info', turn });
+      return state;
+    }
+  }
+
+  // Chest — open for loot
+  if (tile === Tile.Chest) {
+    const newTiles = state.floor.tiles.map(row => [...row]);
+    newTiles[newY][newX] = Tile.Floor;
+    newState.floor = { ...state.floor, tiles: newTiles };
+    log.push({ text: '📦 You open a treasure chest!', type: 'pickup', turn });
+
+    // Generate 1-2 random items from available pool
+    const available = getItemsForFloor(state.floorNumber);
+    if (available.length > 0) {
+      const numLoot = 1 + (rng() < 0.3 ? 1 : 0);
+      for (let li = 0; li < numLoot; li++) {
+        // Chests favor rarer items
+        const luckyFindLevel = getCachedMeta(turn).upgrades['lucky_find'] || 0;
+        const luckBonus = 1 + luckyFindLevel * 0.2 + 0.5; // Chest gives +0.5 extra luck
+        const weights = available.map(it => {
+          switch (it.rarity) {
+            case 'common': return 5;
+            case 'uncommon': return 8 * luckBonus;
+            case 'rare': return 4 * luckBonus * luckBonus;
+            case 'legendary': return 1.5 * luckBonus * luckBonus * luckBonus;
+          }
+        });
+        const totalWeight = weights.reduce((a, b) => a + b, 0);
+        let roll = rng() * totalWeight;
+        let chosen = available[0];
+        for (let j = 0; j < available.length; j++) {
+          roll -= weights[j];
+          if (roll <= 0) { chosen = available[j]; break; }
+        }
+        // Place item at chest position
+        newState.items = [...(newState.items || state.items), { defId: chosen.id, pos: { x: newX, y: newY } }];
+        const rarityLabel = chosen.rarity !== 'common' ? ` [${chosen.rarity}]` : '';
+        log.push({ text: `  Found ${chosen.icon} ${chosen.name}${rarityLabel}!`, type: 'pickup', turn });
+      }
+    }
+    newState.score = (newState.score || state.score) + 50;
+  }
+
   // Water — walkable but slow (skip enemy turn? or just flavor)
   if (tile === Tile.Water) {
     log.push({ text: 'You wade through shallow water.', type: 'info', turn });
@@ -360,7 +478,7 @@ export function processAction(state: GameState, direction: Direction): GameState
   }
 
   // Recompute FOV
-  computeFOV(newState.floor, newX, newY, getViewRadius());
+  computeFOV(newState.floor, newX, newY, getViewRadius(turn));
 
   return finalizeTurn({
     ...newState,
@@ -381,14 +499,17 @@ function processCombat(state: GameState, enemyIdx: number, turn: number, log: Lo
   let rawDmg = Math.max(1, playerStats.atk - enemy.def + rngInt(-1, 2));
 
   // Apply crit chance from class passive
+  let isCrit = false;
   if (playerClass && playerClass.passiveEffect.type === 'crit_chance') {
     if (rng() < (playerClass.passiveEffect.value / 100)) {
       rawDmg *= 2;
+      isCrit = true;
       log.push({ text: '⚡ CRITICAL HIT!', type: 'combat', turn });
     }
   }
 
   enemy.hp -= rawDmg;
+  addDamageEvent(enemy.pos.x, enemy.pos.y, `-${rawDmg}`, isCrit ? '#fbbf24' : '#ff6b6b');
   log.push({
     text: `You hit ${enemyDef?.icon || '?'} ${enemyDef?.name || 'enemy'} for ${rawDmg} damage!`,
     type: 'combat',
@@ -416,7 +537,7 @@ function processCombat(state: GameState, enemyIdx: number, turn: number, log: Lo
     let soulsEarned = Math.floor(xpGain / 10);
 
     // Apply soul_magnet meta upgrade bonus
-    const meta = loadMeta();
+    const meta = getCachedMeta(turn);
     const soulMagnetLevel = meta.upgrades['soul_magnet'] || 0;
     if (soulMagnetLevel > 0) {
       const soulBonus = 1 + (soulMagnetLevel * 0.1);
@@ -482,7 +603,7 @@ function processCombat(state: GameState, enemyIdx: number, turn: number, log: Lo
 // --- Grant XP and handle level ups ---
 function grantXP(player: PlayerState, xp: number, log: LogEntry[], turn: number): PlayerState {
   // Apply Quick Learner meta bonus
-  const meta = loadMeta();
+  const meta = getCachedMeta(turn);
   const quickLearnerLevel = meta.upgrades['quick_learner'] || 0;
   const xpMultiplier = 1 + (quickLearnerLevel * 0.10); // 10% per level
   const actualXp = Math.floor(xp * xpMultiplier);
@@ -505,6 +626,7 @@ function grantXP(player: PlayerState, xp: number, log: LogEntry[], turn: number)
     p.maxMp += 2;
     p.mp = p.maxMp;
 
+    addDamageEvent(p.pos.x, p.pos.y, `LV ${p.level}!`, '#fbbf24');
     log.push({
       text: `🎉 LEVEL UP! You are now level ${p.level}! (+${hpGain} HP${atkGain ? `, +${atkGain} ATK` : ''}${defGain ? `, +${defGain} DEF` : ''})`,
       type: 'levelup',
@@ -532,11 +654,12 @@ function finalizeTurn(state: GameState, log: LogEntry[]): GameState {
   // Check player death
   if (newState.player.hp <= 0) {
     // Second Wind: chance to survive killing blow
-    const meta = loadMeta();
+    const meta = getCachedMeta(turn);
     const secondWindLevel = meta.upgrades['second_wind'] || 0;
     const surviveChance = secondWindLevel * 0.10; // 10% per level, max 30%
     if (secondWindLevel > 0 && rng() < surviveChance) {
       newState.player = { ...newState.player, hp: Math.floor(newState.player.maxHp * 0.25) };
+      addDamageEvent(newState.player.pos.x, newState.player.pos.y, 'SECOND WIND!', '#a78bfa');
       newLog.push({ text: '💨 Second Wind! You narrowly escape death!', type: 'levelup', turn });
     } else {
       newState.gameOver = true;
@@ -609,6 +732,7 @@ function processEnemyTurns(state: GameState, log: LogEntry[], turn: number): Gam
       // Check invulnerability
       const isInvuln = newState.player.statusEffects.some(e => e.type === 'invulnerable');
       if (isInvuln) {
+        addDamageEvent(newState.player.pos.x, newState.player.pos.y, 'IMMUNE', '#a78bfa');
         log.push({ text: `${def.icon} ${def.name} attacks but you are invulnerable!`, type: 'combat', turn });
       } else {
         const playerStats = getEffectiveStats(newState.player);
@@ -618,6 +742,7 @@ function processEnemyTurns(state: GameState, log: LogEntry[], turn: number): Gam
         if (playerClass && playerClass.passiveEffect.type === 'dodge') {
           if (rng() < (playerClass.passiveEffect.value / 100)) {
             rawDmg = 0;
+            addDamageEvent(newState.player.pos.x, newState.player.pos.y, 'DODGE', '#34d399');
             log.push({ text: `${def.icon} ${def.name} attacks but you dodge!`, type: 'combat', turn });
           }
         }
@@ -626,11 +751,13 @@ function processEnemyTurns(state: GameState, log: LogEntry[], turn: number): Gam
         if (playerClass && playerClass.passiveEffect.type === 'thorns' && rawDmg > 0) {
           const thornDmg = playerClass.passiveEffect.value;
           enemy.hp -= thornDmg;
+          addDamageEvent(enemy.pos.x, enemy.pos.y, `-${thornDmg}`, '#f97316');
           log.push({ text: `${def.icon} ${def.name} is hurt by your thorns! (${thornDmg} dmg)`, type: 'combat', turn });
         }
 
         newState.player = { ...newState.player, hp: newState.player.hp - rawDmg };
         if (rawDmg > 0) {
+          addDamageEvent(newState.player.pos.x, newState.player.pos.y, `-${rawDmg}`, '#ef4444');
           log.push({
             text: `${def.icon} ${def.name} hits you for ${rawDmg} damage!`,
             type: 'combat',
@@ -886,6 +1013,7 @@ export function useItem(state: GameState, inventoryIdx: number): GameState {
         }
 
         player.hp += actualHeal;
+        if (actualHeal > 0) addDamageEvent(player.pos.x, player.pos.y, `+${actualHeal}`, '#22c55e');
         log.push({ text: `Used ${def.icon} ${def.name}. Healed ${actualHeal} HP!`, type: 'pickup', turn });
       }
       // Apply status effect

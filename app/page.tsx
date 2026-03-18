@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { GameState, Tile, Direction, MetaProgression, BiomeType, Achievement } from '@/lib/types';
-import { createNewGame, processAction, useItem, dropItem, getEffectiveStats, calculateScore } from '@/lib/gameEngine';
+import { createNewGame, processAction, useItem, dropItem, getEffectiveStats, calculateScore, consumeDamageEvents } from '@/lib/gameEngine';
+import { DamageEvent } from '@/lib/types';
 import { getEnemyDef, getItemDef } from '@/lib/entities';
 import { getBiomeForFloor, getBiomeCSS } from '@/lib/biomes';
 import { loadMeta, saveMeta, checkAchievements, calculateSoulsEarned, META_UPGRADES, PLAYER_CLASSES, ACHIEVEMENTS, getUpgradeCost, unlockClass } from '@/lib/meta';
@@ -67,6 +68,21 @@ export default function GamePage() {
   const [highScores, setHighScores] = useState<HighScoreEntry[]>([]);
   const [newlyUnlockedAchievements, setNewlyUnlockedAchievements] = useState<Achievement[]>([]);
   const [showMinimap, setShowMinimap] = useState(false);
+  const [damageEvents, setDamageEvents] = useState<DamageEvent[]>([]);
+  const damageTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Helper to collect damage events after a game action
+  const collectDamageEvents = () => {
+    const events = consumeDamageEvents();
+    if (events.length > 0) {
+      setDamageEvents(prev => [...prev, ...events]);
+      // Clear events after animation duration
+      if (damageTimerRef.current) clearTimeout(damageTimerRef.current);
+      damageTimerRef.current = setTimeout(() => {
+        setDamageEvents([]);
+      }, 800);
+    }
+  };
 
   // Load meta and high scores on mount
   useEffect(() => {
@@ -160,6 +176,7 @@ export default function GamePage() {
       if (direction) {
         const newState = processAction(gameState, direction);
         setGameState(newState);
+        collectDamageEvents();
 
         // Sound effects and game over check
         if (soundEnabled) {
@@ -266,6 +283,7 @@ export default function GamePage() {
     if (!gameState || screen !== 'game') return;
     const newState = processAction(gameState, dir);
     setGameState(newState);
+    collectDamageEvents();
 
     if (soundEnabled) {
       if (newState.player.hp < gameState.player.hp) sfxPlayerHurt();
@@ -551,7 +569,28 @@ export default function GamePage() {
         </div>
 
         <div className="game-main">
-          <div className="viewport" style={{ gridTemplateColumns: `repeat(${VIEWPORT_W}, 1fr)` }}>{tileGrid}</div>
+          <div className="viewport-wrapper">
+            <div className="viewport" style={{ gridTemplateColumns: `repeat(${VIEWPORT_W}, 1fr)` }}>{tileGrid}</div>
+            {/* Floating damage numbers */}
+            {damageEvents.map(evt => {
+              const screenX = evt.x - camX;
+              const screenY = evt.y - camY;
+              if (screenX < 0 || screenX >= VIEWPORT_W || screenY < 0 || screenY >= VIEWPORT_H) return null;
+              return (
+                <div
+                  key={evt.id}
+                  className="damage-float"
+                  style={{
+                    left: `${(screenX / VIEWPORT_W) * 100}%`,
+                    top: `${(screenY / VIEWPORT_H) * 100}%`,
+                    color: evt.color,
+                  }}
+                >
+                  {evt.value}
+                </div>
+              );
+            })}
+          </div>
 
           <div className="game-sidebar">
             {onStairs && <div className="stairs-prompt">Press ENTER to descend</div>}
@@ -591,6 +630,7 @@ export default function GamePage() {
             const newDirection: Direction = 'wait';
             const newState = processAction(gameState, newDirection);
             setGameState(newState);
+            collectDamageEvents();
           }} title="Wait (Space)">
             ⏳ WAIT
           </button>

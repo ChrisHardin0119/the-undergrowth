@@ -1851,3 +1851,57 @@ button, .btn, [role="button"] {
 .bar-fill {
   transition: width 0.3s ease, background-color 0.3s ease;
 }
+
+/* ============================================
+   VIEWPORT WRAPPER & FLOATING DAMAGE NUMBERS
+   ============================================ */
+.viewport-wrapper {
+  position: relative;
+  overflow: hidden;
+}
+
+.damage-float {
+  position: absolute;
+  pointer-events: none;
+  font-family: 'Press Start 2P', cursive;
+  font-size: 10px;
+  font-weight: bold;
+  text-shadow: 0 0 4px currentColor, 1px 1px 0 #000, -1px -1px 0 #000;
+  z-index: 20;
+  animation: dmg-float 0.8s ease-out forwards;
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+
+@keyframes dmg-float {
+  0% {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-30px);
+  }
+}
+
+/* ============================================
+   DOOR & CHEST TILE STYLING
+   ============================================ */
+.tile-door {
+  color: #a78bfa;
+  text-shadow: 0 0 4px #a78bfa;
+}
+
+.tile-chest {
+  color: #fbbf24;
+  text-shadow: 0 0 6px #fbbf24;
+  animation: chest-glow 2s ease-in-out infinite;
+}
+
+@keyframes chest-glow {
+  0%, 100% { text-shadow: 0 0 4px #fbbf24; }
+  50% { text-shadow: 0 0 10px #fbbf24, 0 0 20px #f59e0b; }
+}

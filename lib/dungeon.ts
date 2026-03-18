@@ -124,6 +124,51 @@ export function generateFloor(floorNumber: number): DungeonFloor {
     addAbyssFloorVariants(tiles, width, height);
   }
 
+  // Place locked doors in some corridor chokepoints (from floor 3+)
+  if (floorNumber >= 3 && rooms.length >= 4) {
+    const numDoors = Math.min(3, Math.floor(floorNumber / 5) + 1);
+    let doorsPlaced = 0;
+    for (let i = 1; i < rooms.length - 1 && doorsPlaced < numDoors; i++) {
+      if (rng() < 0.35) {
+        // Find a corridor tile between this room and the next
+        const a = rooms[i];
+        const b = rooms[i + 1] || rooms[i - 1];
+        const midX = Math.floor((a.centerX + b.centerX) / 2);
+        const midY = Math.floor((a.centerY + b.centerY) / 2);
+        // Check if the mid-point is a floor tile in a narrow corridor
+        if (midY > 0 && midY < height - 1 && midX > 0 && midX < width - 1 &&
+            tiles[midY][midX] === Tile.Floor) {
+          // Check it's a chokepoint (walls on at least 2 opposite sides)
+          const horizWalls = (tiles[midY][midX - 1] === Tile.Wall ? 1 : 0) + (tiles[midY][midX + 1] === Tile.Wall ? 1 : 0);
+          const vertWalls = (tiles[midY - 1][midX] === Tile.Wall ? 1 : 0) + (tiles[midY + 1][midX] === Tile.Wall ? 1 : 0);
+          if (horizWalls >= 2 || vertWalls >= 2) {
+            tiles[midY][midX] = Tile.Door;
+            doorsPlaced++;
+          }
+        }
+      }
+    }
+  }
+
+  // Place treasure chests in some rooms (from floor 2+)
+  if (floorNumber >= 2 && rooms.length >= 3) {
+    const numChests = rng() < 0.5 ? 1 : (rng() < 0.3 ? 2 : 0);
+    let chestsPlaced = 0;
+    for (let i = 1; i < rooms.length - 1 && chestsPlaced < numChests; i++) {
+      if (rng() < 0.4) {
+        const room = rooms[i];
+        // Place chest in a corner of the room
+        const cx = room.x + (rng() < 0.5 ? 1 : room.w - 2);
+        const cy = room.y + (rng() < 0.5 ? 1 : room.h - 2);
+        if (cy > 0 && cy < height - 1 && cx > 0 && cx < width - 1 &&
+            tiles[cy][cx] === Tile.Floor) {
+          tiles[cy][cx] = Tile.Chest;
+          chestsPlaced++;
+        }
+      }
+    }
+  }
+
   // Place stairs down in the last room
   const lastRoom = rooms[rooms.length - 1];
   tiles[lastRoom.centerY][lastRoom.centerX] = Tile.StairsDown;

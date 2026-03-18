@@ -247,6 +247,15 @@ export interface GameState {
   isEndless: boolean;
 }
 
+// --- Damage Event (for floating numbers) ---
+export interface DamageEvent {
+  x: number;
+  y: number;
+  value: string; // e.g. "-12", "+5", "DODGE", "CRIT"
+  color: string; // CSS color
+  id: number; // unique ID for animation keys
+}
+
 // --- High Score ---
 export interface HighScore {
   score: number;
