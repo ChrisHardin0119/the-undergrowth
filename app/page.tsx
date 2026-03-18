@@ -361,7 +361,15 @@ export default function GamePage() {
         </div>
 
         <div className="class-buttons">
-          <button className="btn btn-primary" onClick={() => startNewGame(selectedClass)}>
+          <button
+            className={`btn btn-primary ${!meta?.unlockedClasses.includes(selectedClass) ? 'btn-disabled' : ''}`}
+            disabled={!meta?.unlockedClasses.includes(selectedClass)}
+            onClick={() => {
+              if (meta?.unlockedClasses.includes(selectedClass)) {
+                startNewGame(selectedClass);
+              }
+            }}
+          >
             START GAME
           </button>
           <button className="btn btn-secondary" onClick={() => setScreen('menu')}>
@@ -454,8 +462,10 @@ export default function GamePage() {
       .filter(Boolean) as { enemy: typeof enemies[0]; dir: string }[];
 
     const xpPercent = (player.xp / player.xpToNext) * 100;
-    const hpPercent = (player.hp / player.maxHp) * 100;
+    const hpPercent = (player.hp / getEffectiveStats(player).maxHp) * 100;
     const mpPercent = (player.mp / player.maxMp) * 100;
+    const hpColor = hpPercent > 60 ? '#22c55e' : hpPercent > 30 ? '#eab308' : '#ef4444';
+    const effectiveStats = getEffectiveStats(player);
 
     return (
       <div className="screen screen-game" style={getBiomeCSS(biome)}>
@@ -472,10 +482,10 @@ export default function GamePage() {
             <div className="bar-group">
               <div className="bar-label">HP</div>
               <div className="bar-bg">
-                <div className="bar-fill" style={{ width: `${hpPercent}%` }} />
+                <div className="bar-fill" style={{ width: `${hpPercent}%`, backgroundColor: hpColor }} />
               </div>
               <div className="bar-text">
-                {player.hp}/{player.maxHp}
+                {player.hp}/{effectiveStats.maxHp}
               </div>
             </div>
 
@@ -502,10 +512,24 @@ export default function GamePage() {
 
           <div className="stats-bar">
             <span>LV {player.level}</span>
-            <span>ATK {player.atk}</span>
-            <span>DEF {player.def}</span>
-            {player.statusEffects.length > 0 && <span>⚡ {player.statusEffects.length} effect{player.statusEffects.length > 1 ? 's' : ''}</span>}
+            <span>ATK {effectiveStats.atk}{effectiveStats.atk > player.atk ? ` (+${effectiveStats.atk - player.atk})` : ''}</span>
+            <span>DEF {effectiveStats.def}{effectiveStats.def > player.def ? ` (+${effectiveStats.def - player.def})` : ''}</span>
+            {player.statusEffects.length > 0 && (
+              <span>{player.statusEffects.map(e => {
+                switch(e.type) {
+                  case 'poison': return '☠️';
+                  case 'regen': return '💚';
+                  case 'strength': return '💪';
+                  case 'shield': return '🛡️';
+                  case 'haste': return '⚡';
+                  case 'fire_aura': return '🔥';
+                  case 'invulnerable': return '✨';
+                  default: return '⚡';
+                }
+              }).join(' ')}</span>
+            )}
             {player.keys > 0 && <span>🔑 {player.keys}</span>}
+            <span>Souls: {gameState.soulsEarned}</span>
           </div>
         </div>
 
@@ -541,16 +565,23 @@ export default function GamePage() {
 
         <div className="action-bar">
           <button className="action-btn" onClick={() => setScreen('inventory')} title="Inventory (I)">
-            📦
+            📦 INV
           </button>
           <button className="action-btn" onClick={() => setShowMinimap(!showMinimap)} title="Minimap (M)">
-            🗺️
+            🗺️ MAP
+          </button>
+          <button className="action-btn" onClick={() => {
+            const newDirection: Direction = 'wait';
+            const newState = processAction(gameState, newDirection);
+            setGameState(newState);
+          }} title="Wait (Space)">
+            ⏳ WAIT
           </button>
           <button className="action-btn" onClick={() => setScreen('help')} title="Help (H)">
-            ❓
+            ❓ HELP
           </button>
-          <button className="action-btn" onClick={() => setScreen('soul_shop')} title="Soul Shop">
-            ⏳
+          <button className="action-btn" onClick={() => setSoundEnabled(!soundEnabled)} title="Toggle Sound">
+            {soundEnabled ? '🔊' : '🔇'}
           </button>
         </div>
 
@@ -632,39 +663,36 @@ export default function GamePage() {
           <div className="inv-section">
             <h3>Equipment</h3>
             <div className="equipment-grid">
-              <div className={`equipment-slot ${player.equipment.weapon ? 'equipped' : ''}`}>
-                <div className="slot-name">Weapon</div>
-                {player.equipment.weapon ? (
-                  <>
-                    <div>{getItemDef(player.equipment.weapon.defId)?.icon || '?'}</div>
-                    <div className="slot-item">{getItemDef(player.equipment.weapon.defId)?.name}</div>
-                  </>
-                ) : (
-                  <div>-</div>
-                )}
-              </div>
-              <div className={`equipment-slot ${player.equipment.armor ? 'equipped' : ''}`}>
-                <div className="slot-name">Armor</div>
-                {player.equipment.armor ? (
-                  <>
-                    <div>{getItemDef(player.equipment.armor.defId)?.icon || '?'}</div>
-                    <div className="slot-item">{getItemDef(player.equipment.armor.defId)?.name}</div>
-                  </>
-                ) : (
-                  <div>-</div>
-                )}
-              </div>
-              <div className={`equipment-slot ${player.equipment.accessory ? 'equipped' : ''}`}>
-                <div className="slot-name">Accessory</div>
-                {player.equipment.accessory ? (
-                  <>
-                    <div>{getItemDef(player.equipment.accessory.defId)?.icon || '?'}</div>
-                    <div className="slot-item">{getItemDef(player.equipment.accessory.defId)?.name}</div>
-                  </>
-                ) : (
-                  <div>-</div>
-                )}
-              </div>
+              {(['weapon', 'armor', 'accessory'] as const).map(slot => {
+                const equip = player.equipment[slot];
+                const equipDef = equip ? getItemDef(equip.defId) : null;
+                const bonuses: string[] = [];
+                if (equipDef?.atkBonus) bonuses.push(`ATK +${equipDef.atkBonus}`);
+                if (equipDef?.defBonus) bonuses.push(`DEF +${equipDef.defBonus}`);
+                if (equipDef?.hpBonus) bonuses.push(`HP +${equipDef.hpBonus}`);
+
+                return (
+                  <div key={slot} className={`equipment-slot ${equip ? 'equipped' : ''}`}>
+                    <div className="slot-name">{slot.charAt(0).toUpperCase() + slot.slice(1)}</div>
+                    {equip && equipDef ? (
+                      <>
+                        <div>{equipDef.icon}</div>
+                        <div className="slot-item">{equipDef.name}</div>
+                        {bonuses.length > 0 && <div className="slot-bonus">{bonuses.join(', ')}</div>}
+                        <button className="btn btn-small" onClick={() => {
+                          // Unequip: move back to inventory
+                          const newPlayer = { ...player };
+                          newPlayer.equipment = { ...player.equipment, [slot]: null };
+                          newPlayer.inventory = [...player.inventory, equip];
+                          setGameState({ ...gameState, player: newPlayer });
+                        }}>REMOVE</button>
+                      </>
+                    ) : (
+                      <div className="slot-empty">Empty</div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
 
@@ -686,11 +714,29 @@ export default function GamePage() {
               {Array.from(grouped.entries()).map(([defId, count]) => {
                 const itemDef = getItemDef(defId);
                 const firstIndex = player.inventory.findIndex(i => i.defId === defId);
+                if (!itemDef) return null;
+
+                // Build stat line
+                const stats: string[] = [];
+                if (itemDef.atkBonus) stats.push(`ATK +${itemDef.atkBonus}`);
+                if (itemDef.defBonus) stats.push(`DEF +${itemDef.defBonus}`);
+                if (itemDef.hpBonus) stats.push(`HP +${itemDef.hpBonus}`);
+                if (itemDef.healAmount) stats.push(`Heal ${itemDef.healAmount}`);
+                if (itemDef.statusEffect) stats.push(`${itemDef.statusEffect.type} (${itemDef.statusEffect.turnsLeft}t)`);
+                if (itemDef.scrollEffect) stats.push(`${itemDef.scrollEffect.replace(/_/g, ' ')}`);
+
+                const rarityColor = itemDef.rarity === 'legendary' ? '#fbbf24' :
+                  itemDef.rarity === 'rare' ? '#a78bfa' :
+                  itemDef.rarity === 'uncommon' ? '#34d399' : '#9ca3af';
 
                 return (
-                  <div key={defId} className="item-stack">
-                    <div className="item-icon">{itemDef?.icon || '?'}</div>
-                    <div className="item-name">{itemDef?.name || 'Unknown'}</div>
+                  <div key={defId} className="item-stack" style={{ borderLeft: `3px solid ${rarityColor}` }}>
+                    <div className="item-icon">{itemDef.icon}</div>
+                    <div className="item-details">
+                      <div className="item-name" style={{ color: rarityColor }}>{itemDef.name}</div>
+                      <div className="item-desc">{itemDef.description}</div>
+                      {stats.length > 0 && <div className="item-stats">{stats.join(' | ')}</div>}
+                    </div>
                     {count > 1 && <div className="item-count">x{count}</div>}
                     <div className="item-buttons">
                       <button
@@ -701,7 +747,7 @@ export default function GamePage() {
                           if (soundEnabled) sfxUseItem();
                         }}
                       >
-                        USE
+                        {itemDef.type === 'equipment' ? 'EQUIP' : 'USE'}
                       </button>
                       <button
                         className="btn btn-small"
@@ -947,7 +993,13 @@ export default function GamePage() {
             TRY AGAIN
           </button>
           {gameState.victory && (
-            <button className="btn btn-secondary" onClick={() => startNewGame(gameState.classId)}>
+            <button className="btn btn-secondary" onClick={() => {
+              // Continue the game into endless mode instead of starting over
+              const continued = { ...gameState, gameOver: false, isEndless: true };
+              setGameState(continued);
+              if (soundEnabled) startAmbient();
+              setScreen('game');
+            }}>
               CONTINUE DESCENT
             </button>
           )}

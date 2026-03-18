@@ -1761,3 +1761,93 @@ button, .btn, [role="button"] {
 .stairs-btn {
   animation: stairs-blink 1.5s ease-in-out infinite;
 }
+
+/* ============================================
+   ENHANCED INVENTORY ITEMS
+   ============================================ */
+.item-stack {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  background: rgba(0, 255, 208, 0.05);
+  border-radius: 4px;
+  position: relative;
+}
+
+.item-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.item-desc {
+  font-size: 8px;
+  color: #888;
+  margin-top: 2px;
+  font-family: 'Press Start 2P', cursive;
+  line-height: 1.3;
+}
+
+.item-stats {
+  font-size: 7px;
+  color: var(--cyan);
+  margin-top: 2px;
+  font-family: 'Press Start 2P', cursive;
+}
+
+.item-count {
+  font-family: 'Press Start 2P', cursive;
+  font-size: 10px;
+  color: #fbbf24;
+  min-width: 30px;
+  text-align: center;
+}
+
+/* Equipment slot styling */
+.equipment-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  min-width: 100px;
+}
+
+.equipment-slot.equipped {
+  border-color: var(--cyan);
+  background: rgba(0, 255, 208, 0.1);
+}
+
+.slot-name {
+  font-family: 'Press Start 2P', cursive;
+  font-size: 8px;
+  color: #888;
+  text-transform: uppercase;
+}
+
+.slot-item {
+  font-family: 'Press Start 2P', cursive;
+  font-size: 8px;
+  color: var(--cyan);
+}
+
+.slot-bonus {
+  font-family: 'Press Start 2P', cursive;
+  font-size: 7px;
+  color: #34d399;
+}
+
+.slot-empty {
+  font-family: 'Press Start 2P', cursive;
+  font-size: 8px;
+  color: #555;
+}
+
+/* ============================================
+   HP BAR COLORS
+   ============================================ */
+.bar-fill {
+  transition: width 0.3s ease, background-color 0.3s ease;
+}

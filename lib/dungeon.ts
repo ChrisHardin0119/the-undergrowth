@@ -286,11 +286,13 @@ export function findRandomWalkable(floor: DungeonFloor, occupied: Pos[]): Pos | 
 export function isWalkable(tile: Tile): boolean {
   // Floor variants: Mushroom, Crystal, Vine, BoneFloor, AbyssFloor are all walkable
   // StairsDown and Door are walkable
-  // Water and Lava are NOT walkable (water damages/blocks, lava is impassable)
+  // Water is walkable (shallow water, cosmetic slowdown message)
+  // Lava is NOT walkable (impassable hazard)
   return (
     tile === Tile.Floor ||
     tile === Tile.StairsDown ||
     tile === Tile.Door ||
+    tile === Tile.Water ||
     tile === Tile.Mushroom ||
     tile === Tile.Crystal ||
     tile === Tile.Vine ||
