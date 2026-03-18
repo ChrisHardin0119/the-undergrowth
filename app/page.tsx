@@ -1,21 +1,27 @@
 'use client';
-// ============================================
-// THE UNDERGROWTH — Main Game Page
-// Full roguelike dungeon crawler
-// ============================================
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { GameState, Tile, Direction, EnemyInstance, ItemInstance, Pos, HighScore } from '@/lib/types';
-import { createNewGame, processAction, useItem, dropItem, descendFloor, getEffectiveStats, calculateScore } from '@/lib/gameEngine';
+import { GameState, Tile, Direction, MetaProgression, BiomeType, Achievement } from '@/lib/types';
+import { createNewGame, processAction, useItem, dropItem, getEffectiveStats, calculateScore } from '@/lib/gameEngine';
 import { getEnemyDef, getItemDef } from '@/lib/entities';
-import { computeFOV } from '@/lib/fov';
+import { getBiomeForFloor, getBiomeCSS } from '@/lib/biomes';
+import { loadMeta, saveMeta, checkAchievements, calculateSoulsEarned, META_UPGRADES, PLAYER_CLASSES, ACHIEVEMENTS } from '@/lib/meta';
 import { initAudio, sfxStep, sfxHit, sfxPlayerHurt, sfxPickup, sfxLevelUp, sfxDeath, sfxDescend, sfxBoss, sfxVictory, sfxUseItem, startAmbient, stopAmbient } from '@/lib/audio';
 
-// --- Viewport config ---
+type ScreenType = 'menu' | 'class_select' | 'game' | 'inventory' | 'soul_shop' | 'achievements' | 'help' | 'gameover';
+
+interface HighScoreEntry {
+  score: number;
+  floor: number;
+  level: number;
+  className: string;
+  turns: number;
+}
+
 const VIEWPORT_W = 21;
 const VIEWPORT_H = 15;
+const MAX_HIGH_SCORES = 10;
 
-// --- Tile rendering ---
 function getTileChar(tile: Tile): string {
   switch (tile) {
     case Tile.Wall: return ' ';
@@ -25,6 +31,11 @@ function getTileChar(tile: Tile): string {
     case Tile.Water: return '~';
     case Tile.Mushroom: return '🍄';
     case Tile.Chest: return '📦';
+    case Tile.Lava: return '🔥';
+    case Tile.Crystal: return '💎';
+    case Tile.Vine: return '🌿';
+    case Tile.BoneFloor: return '·';
+    case Tile.AbyssFloor: return '·';
     default: return ' ';
   }
 }
@@ -38,455 +49,325 @@ function getTileClass(tile: Tile): string {
     case Tile.Water: return 'tile-water';
     case Tile.Mushroom: return 'tile-mushroom';
     case Tile.Chest: return 'tile-chest';
+    case Tile.Lava: return 'tile-lava';
+    case Tile.Crystal: return 'tile-crystal';
+    case Tile.Vine: return 'tile-vine';
+    case Tile.BoneFloor: return 'tile-bone';
+    case Tile.AbyssFloor: return 'tile-abyss';
     default: return 'tile-wall';
   }
 }
 
-function getRarityColor(rarity: string): string {
-  switch (rarity) {
-    case 'common': return '#94a3b8';
-    case 'uncommon': return '#22c55e';
-    case 'rare': return '#3b82f6';
-    case 'legendary': return '#f59e0b';
-    default: return '#94a3b8';
-  }
-}
-
-// --- High Scores ---
-function loadHighScores(): HighScore[] {
-  try {
-    const raw = localStorage.getItem('undergrowth_scores');
-    return raw ? JSON.parse(raw) : [];
-  } catch { return []; }
-}
-
-function saveHighScore(score: HighScore) {
-  try {
-    const scores = loadHighScores();
-    scores.push(score);
-    scores.sort((a, b) => b.score - a.score);
-    localStorage.setItem('undergrowth_scores', JSON.stringify(scores.slice(0, 10)));
-  } catch { /* ignore */ }
-}
-
-// --- Main Game Component ---
 export default function GamePage() {
+  const [screen, setScreen] = useState<ScreenType>('menu');
   const [gameState, setGameState] = useState<GameState | null>(null);
-  const [screen, setScreen] = useState<'menu' | 'game' | 'gameover' | 'inventory' | 'help'>('menu');
-  const [highScores, setHighScores] = useState<HighScore[]>([]);
-  const [sfxEnabled, setSfxEnabled] = useState(true);
+  const [meta, setMeta] = useState<MetaProgression | null>(null);
+  const [selectedClass, setSelectedClass] = useState<string>('warrior');
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [highScores, setHighScores] = useState<HighScoreEntry[]>([]);
+  const [newlyUnlockedAchievements, setNewlyUnlockedAchievements] = useState<Achievement[]>([]);
   const [showMinimap, setShowMinimap] = useState(false);
-  const [selectedInventoryIdx, setSelectedInventoryIdx] = useState<number | null>(null);
-  const [mobileDir, setMobileDir] = useState<Direction | null>(null);
-  const gameRef = useRef<HTMLDivElement>(null);
-  const prevHpRef = useRef<number>(0);
-  const scoreSavedRef = useRef(false);
 
-  // Load high scores on mount
+  // Load meta and high scores on mount
   useEffect(() => {
-    setHighScores(loadHighScores());
     initAudio();
+    const loadedMeta = loadMeta();
+    setMeta(loadedMeta);
+
+    const scores = localStorage.getItem('undergrowth_scores');
+    if (scores) {
+      setHighScores(JSON.parse(scores));
+    }
   }, []);
 
-  // Focus game div for keyboard input
+  // Keyboard handler
   useEffect(() => {
-    if (screen === 'game' && gameRef.current) {
-      gameRef.current.focus();
-    }
-  }, [screen]);
+    if (!soundEnabled) return;
 
-  // Start new game
-  const startGame = useCallback(() => {
-    const state = createNewGame();
-    setGameState(state);
-    setScreen('game');
-    scoreSavedRef.current = false;
-    prevHpRef.current = state.player.hp;
-    if (sfxEnabled) startAmbient();
-  }, [sfxEnabled]);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
 
-  // Handle keyboard input
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (!gameState || screen !== 'game') return;
-    if (gameState.gameOver || gameState.victory) return;
-
-    let dir: Direction | null = null;
-
-    switch (e.key) {
-      case 'ArrowUp': case 'w': case 'W': dir = 'up'; break;
-      case 'ArrowDown': case 's': case 'S': dir = 'down'; break;
-      case 'ArrowLeft': case 'a': case 'A': dir = 'left'; break;
-      case 'ArrowRight': case 'd': case 'D': dir = 'right'; break;
-      case 'q': case 'Q': dir = 'upleft'; break;
-      case 'e': case 'E': dir = 'upright'; break;
-      case 'z': case 'Z': dir = 'downleft'; break;
-      case 'c': case 'C': dir = 'downright'; break;
-      case ' ': case '.': dir = 'wait'; break;
-      case 'i': case 'I':
-        setScreen('inventory');
+      // Inventory toggle (I key) - works on game and inventory screens
+      if (key === 'i' && (screen === 'game' || screen === 'inventory')) {
         e.preventDefault();
+        setScreen(screen === 'inventory' ? 'game' : 'inventory');
         return;
-      case 'm': case 'M':
-        setShowMinimap(prev => !prev);
+      }
+
+      // Escape - back from inventory or help to game
+      if (key === 'escape' && (screen === 'inventory' || screen === 'help')) {
         e.preventDefault();
+        setScreen('game');
         return;
-      case '>': case 'Enter':
-        // Descend stairs
-        if (gameState.floor.tiles[gameState.player.pos.y][gameState.player.pos.x] === Tile.StairsDown) {
-          const newState = descendFloor(gameState);
-          setGameState(newState);
-          if (sfxEnabled) sfxDescend();
-          e.preventDefault();
-          return;
-        }
-        break;
-      case '?': case 'h': case 'H':
+      }
+
+      // Only process game keys if on game screen
+      if (screen !== 'game' || !gameState) return;
+
+      const { player, floor } = gameState;
+
+      let direction: Direction | null = null;
+
+      // Cardinal directions
+      if (key === 'w' || key === 'arrowup') {
+        e.preventDefault();
+        direction = 'up';
+      } else if (key === 's' || key === 'arrowdown') {
+        e.preventDefault();
+        direction = 'down';
+      } else if (key === 'a' || key === 'arrowleft') {
+        e.preventDefault();
+        direction = 'left';
+      } else if (key === 'd' || key === 'arrowright') {
+        e.preventDefault();
+        direction = 'right';
+      }
+      // Diagonals
+      else if (key === 'q') {
+        e.preventDefault();
+        direction = 'upleft';
+      } else if (key === 'e') {
+        e.preventDefault();
+        direction = 'upright';
+      } else if (key === 'z') {
+        e.preventDefault();
+        direction = 'downleft';
+      } else if (key === 'c') {
+        e.preventDefault();
+        direction = 'downright';
+      }
+      // Wait
+      else if (key === ' ' || key === '.') {
+        e.preventDefault();
+        direction = 'wait';
+      }
+      // Descend (Enter or >)
+      else if (key === 'enter' || key === '>') {
+        e.preventDefault();
+        direction = 'descend';
+      }
+      // Minimap (M)
+      else if (key === 'm') {
+        e.preventDefault();
+        setShowMinimap(!showMinimap);
+        return;
+      }
+      // Help (H or ?)
+      else if (key === 'h' || key === '?') {
+        e.preventDefault();
         setScreen('help');
-        e.preventDefault();
         return;
-      default: return;
-    }
-
-    if (dir) {
-      e.preventDefault();
-      const newState = processAction(gameState, dir);
-      setGameState(newState);
-
-      // Sound effects
-      if (sfxEnabled) {
-        const wasHit = newState.player.hp < prevHpRef.current;
-        const killed = newState.killCount > gameState.killCount;
-        const leveled = newState.player.level > gameState.player.level;
-        const pickedUp = newState.player.inventory.length > gameState.player.inventory.length;
-
-        if (killed) sfxHit();
-        else if (wasHit) sfxPlayerHurt();
-        else if (dir !== 'wait') sfxStep();
-
-        if (leveled) setTimeout(sfxLevelUp, 100);
-        if (pickedUp) sfxPickup();
-
-        if (newState.gameOver) {
-          sfxDeath();
-          stopAmbient();
-        }
-        if (newState.victory) {
-          sfxVictory();
-          stopAmbient();
-        }
-
-        // Boss encounter sound
-        const hasBossLog = newState.gameLog.some(
-          l => l.type === 'boss' && l.turn === newState.turnCount && l.text.includes('sense a powerful')
-        );
-        if (hasBossLog) sfxBoss();
       }
 
-      prevHpRef.current = newState.player.hp;
+      if (direction) {
+        const newState = processAction(gameState, direction);
+        setGameState(newState);
 
-      // Handle game over
-      if ((newState.gameOver || newState.victory) && !scoreSavedRef.current) {
-        scoreSavedRef.current = true;
-        const finalScore = calculateScore(newState);
-        const hs: HighScore = {
-          score: finalScore,
-          floor: newState.deepestFloor,
-          level: newState.player.level,
-          kills: newState.killCount,
-          turns: newState.turnCount,
-          causeOfDeath: newState.victory ? 'VICTORY' : 'Defeated',
-          date: Date.now(),
-        };
-        saveHighScore(hs);
-        setHighScores(loadHighScores());
-        setTimeout(() => setScreen('gameover'), 1500);
+        // Sound effects and game over check
+        if (soundEnabled) {
+          // Check for kills
+          const killedEnemies = gameState.enemies.filter((e, i) => e.hp > 0 && (newState.enemies[i]?.hp ?? 0) <= 0);
+          if (killedEnemies.length > 0) {
+            sfxHit();
+            killedEnemies.forEach(e => {
+              const eDef = getEnemyDef(e.defId);
+              if (eDef?.isBoss) sfxBoss();
+            });
+          }
+
+          // Check for damage taken
+          if (newState.player.hp < gameState.player.hp) {
+            sfxPlayerHurt();
+          }
+
+          // Check for items picked up
+          if (newState.player.inventory.length > gameState.player.inventory.length) {
+            sfxPickup();
+          }
+
+          // Check for level up
+          if (newState.player.level > gameState.player.level) {
+            sfxLevelUp();
+          }
+
+          // Check for movement
+          if ((newState.player.pos.x !== gameState.player.pos.x || newState.player.pos.y !== gameState.player.pos.y) && direction !== 'wait') {
+            sfxStep();
+          }
+        }
+
+        if (newState.gameOver || newState.victory) {
+          if (soundEnabled) {
+            if (newState.victory) {
+              sfxVictory();
+            } else {
+              sfxDeath();
+            }
+            stopAmbient();
+          }
+          handleGameEnd(newState);
+        }
       }
-    }
-  }, [gameState, screen, sfxEnabled]);
+    };
 
-  // Mobile direction tap
-  const handleMobileDir = useCallback((dir: Direction) => {
-    if (!gameState || gameState.gameOver || gameState.victory) return;
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [screen, gameState, soundEnabled]);
 
-    if (dir === 'wait' && gameState.floor.tiles[gameState.player.pos.y][gameState.player.pos.x] === Tile.StairsDown) {
-      const newState = descendFloor(gameState);
-      setGameState(newState);
-      if (sfxEnabled) sfxDescend();
-      return;
-    }
+  const handleGameEnd = (finalState: GameState) => {
+    const souls = calculateSoulsEarned(finalState);
+    const { meta: updatedMeta, newAchievements } = checkAchievements(meta || loadMeta(), finalState);
 
-    const newState = processAction(gameState, dir);
-    setGameState(newState);
-    prevHpRef.current = newState.player.hp;
+    updatedMeta.totalRuns++;
+    updatedMeta.totalKills += finalState.killCount;
+    updatedMeta.souls += souls;
+    updatedMeta.totalSoulsEarned += souls;
 
-    if (sfxEnabled) {
-      if (newState.killCount > gameState.killCount) sfxHit();
-      else if (newState.player.hp < gameState.player.hp) sfxPlayerHurt();
-      else sfxStep();
-    }
+    const finalScore = calculateScore(finalState);
+    updatedMeta.bestScore = Math.max(updatedMeta.bestScore, finalScore);
+    updatedMeta.bestFloor = Math.max(updatedMeta.bestFloor, finalState.deepestFloor);
 
-    if ((newState.gameOver || newState.victory) && !scoreSavedRef.current) {
-      scoreSavedRef.current = true;
-      const finalScore = calculateScore(newState);
-      saveHighScore({
-        score: finalScore,
-        floor: newState.deepestFloor,
-        level: newState.player.level,
-        kills: newState.killCount,
-        turns: newState.turnCount,
-        causeOfDeath: newState.victory ? 'VICTORY' : 'Defeated',
-        date: Date.now(),
-      });
-      setHighScores(loadHighScores());
-      setTimeout(() => setScreen('gameover'), 1500);
-    }
-  }, [gameState, sfxEnabled]);
+    saveMeta(updatedMeta);
+    setMeta(updatedMeta);
+    setNewlyUnlockedAchievements(newAchievements);
 
-  // Use item from inventory screen
-  const handleUseItem = useCallback((idx: number) => {
-    if (!gameState) return;
-    const newState = useItem(gameState, idx);
-    setGameState(newState);
-    if (sfxEnabled) sfxUseItem();
-    setSelectedInventoryIdx(null);
-  }, [gameState, sfxEnabled]);
+    // Save high score
+    const classObj = PLAYER_CLASSES.find(c => c.id === finalState.classId);
+    const newScore: HighScoreEntry = {
+      score: finalScore,
+      floor: finalState.deepestFloor,
+      level: finalState.player.level,
+      className: classObj?.name || 'Unknown',
+      turns: finalState.turnCount,
+    };
 
-  const handleDropItem = useCallback((idx: number) => {
-    if (!gameState) return;
-    const newState = dropItem(gameState, idx);
-    setGameState(newState);
-    setSelectedInventoryIdx(null);
-  }, [gameState]);
+    const updated = [newScore, ...highScores].sort((a, b) => b.score - a.score).slice(0, MAX_HIGH_SCORES);
+    setHighScores(updated);
+    localStorage.setItem('undergrowth_scores', JSON.stringify(updated));
 
-  // --- RENDER ---
+    setScreen('gameover');
+  };
 
-  // Title screen
-  if (screen === 'menu') {
+  const startNewGame = (classId: string) => {
+    if (soundEnabled) startAmbient();
+    const newGame = createNewGame(classId);
+    setGameState(newGame);
+    setSelectedClass(classId);
+    setShowMinimap(false);
+    setScreen('game');
+  };
+
+  // === RENDER FUNCTIONS ===
+
+  const renderMenu = () => {
     return (
-      <div className="game-container menu-screen">
-        <div className="scanline-overlay" />
-        <div className="menu-content">
-          <div className="menu-title-area">
-            <div className="menu-mushroom">🍄</div>
-            <h1 className="menu-title">THE UNDERGROWTH</h1>
-            <p className="menu-subtitle">A Roguelike Dungeon Crawler</p>
-          </div>
-          <div className="menu-tagline">
-            Descend into bioluminescent caves.<br />
-            Fight. Loot. Survive.
-          </div>
-          <button className="menu-btn primary" onClick={startGame}>NEW GAME</button>
-          <button className="menu-btn" onClick={() => setScreen('help')}>HOW TO PLAY</button>
-          <button className="menu-btn" onClick={() => setSfxEnabled(p => !p)}>
-            SOUND: {sfxEnabled ? 'ON' : 'OFF'}
-          </button>
-          {highScores.length > 0 && (
-            <div className="menu-scores">
-              <h3>HIGH SCORES</h3>
-              {highScores.slice(0, 5).map((hs, i) => (
-                <div key={i} className="score-row">
-                  <span className="score-rank">#{i + 1}</span>
-                  <span className="score-val">{hs.score.toLocaleString()}</span>
-                  <span className="score-detail">Lv{hs.level} · F{hs.floor} · {hs.kills}K</span>
-                </div>
-              ))}
-            </div>
-          )}
+      <div className="screen screen-menu">
+        <div className="menu-header">
+          <div className="menu-title">🍄 THE UNDERGROWTH 🍄</div>
+          <div className="menu-subtitle">A Roguelike Dungeon Crawler</div>
         </div>
-      </div>
-    );
-  }
 
-  // Help screen
-  if (screen === 'help') {
-    return (
-      <div className="game-container help-screen">
-        <div className="scanline-overlay" />
-        <div className="help-content">
-          <h2>HOW TO PLAY</h2>
-          <div className="help-section">
-            <h3>MOVEMENT</h3>
-            <p>WASD or Arrow Keys to move in 4 directions</p>
-            <p>Q/E/Z/C for diagonal movement</p>
-            <p>SPACE or . to wait a turn</p>
-          </div>
-          <div className="help-section">
-            <h3>COMBAT</h3>
-            <p>Walk into enemies to attack (bump combat)</p>
-            <p>Enemies move after you each turn</p>
-            <p>Defeat enemies to gain XP and level up</p>
-          </div>
-          <div className="help-section">
-            <h3>ITEMS</h3>
-            <p>Walk over items to pick them up</p>
-            <p>Press I to open inventory</p>
-            <p>Equip weapons and armor for stat bonuses</p>
-            <p>Use potions and scrolls for powerful effects</p>
-          </div>
-          <div className="help-section">
-            <h3>EXPLORATION</h3>
-            <p>Find the stairs (▼) to descend deeper</p>
-            <p>Press ENTER or &gt; on stairs to descend</p>
-            <p>Press M to toggle the minimap</p>
-            <p>Boss fights every 5 floors!</p>
-          </div>
-          <div className="help-section">
-            <h3>GOAL</h3>
-            <p>Reach floor 15 and defeat the Abyssal Maw to win!</p>
-            <p>Death is permanent. How deep can you go?</p>
-          </div>
-          <button className="menu-btn primary" onClick={() => setScreen(gameState ? 'game' : 'menu')}>
-            {gameState ? 'BACK TO GAME' : 'BACK TO MENU'}
+        <div className="menu-buttons">
+          <button className="btn btn-primary" onClick={() => setScreen('class_select')}>
+            NEW GAME
+          </button>
+          <button className="btn btn-secondary" onClick={() => setScreen('soul_shop')}>
+            SOUL SHOP
+          </button>
+          <button className="btn btn-secondary" onClick={() => setScreen('achievements')}>
+            ACHIEVEMENTS
+          </button>
+          <button className="btn btn-secondary" onClick={() => setScreen('help')}>
+            HOW TO PLAY
+          </button>
+          <button className="btn btn-secondary" onClick={() => setSoundEnabled(!soundEnabled)}>
+            {soundEnabled ? '🔊 SOUND ON' : '🔇 SOUND OFF'}
           </button>
         </div>
-      </div>
-    );
-  }
 
-  // Game over screen
-  if (screen === 'gameover' && gameState) {
-    const finalScore = calculateScore(gameState);
-    return (
-      <div className="game-container gameover-screen">
-        <div className="scanline-overlay" />
-        <div className="gameover-content">
-          {gameState.victory ? (
-            <>
-              <div className="gameover-icon">🏆</div>
-              <h1 className="gameover-title victory">VICTORY!</h1>
-              <p className="gameover-subtitle">You conquered the Undergrowth!</p>
-            </>
-          ) : (
-            <>
-              <div className="gameover-icon">💀</div>
-              <h1 className="gameover-title">YOU DIED</h1>
-              <p className="gameover-subtitle">The Undergrowth claims another soul...</p>
-            </>
-          )}
-          <div className="gameover-stats">
-            <div className="go-stat"><span>Score</span><span>{finalScore.toLocaleString()}</span></div>
-            <div className="go-stat"><span>Floor</span><span>{gameState.deepestFloor}</span></div>
-            <div className="go-stat"><span>Level</span><span>{gameState.player.level}</span></div>
-            <div className="go-stat"><span>Kills</span><span>{gameState.killCount}</span></div>
-            <div className="go-stat"><span>Turns</span><span>{gameState.turnCount}</span></div>
-          </div>
-          <button className="menu-btn primary" onClick={startGame}>TRY AGAIN</button>
-          <button className="menu-btn" onClick={() => { stopAmbient(); setScreen('menu'); }}>MAIN MENU</button>
+        <div className="menu-stats">
+          <div className="stat-line">Souls: {meta?.souls || 0}</div>
+          <div className="stat-line">Total Runs: {meta?.totalRuns || 0}</div>
+          <div className="stat-line">Best Floor: {meta?.bestFloor || 0}</div>
+          <div className="stat-line">Best Score: {meta?.bestScore || 0}</div>
         </div>
-      </div>
-    );
-  }
 
-  // Inventory screen
-  if (screen === 'inventory' && gameState) {
-    const stats = getEffectiveStats(gameState.player);
-    return (
-      <div className="game-container inventory-screen">
-        <div className="scanline-overlay" />
-        <div className="inv-content">
-          <div className="inv-header">
-            <h2>INVENTORY</h2>
-            <span className="inv-count">{gameState.player.inventory.length}/{gameState.player.maxInventory}</span>
-          </div>
-
-          {/* Equipment */}
-          <div className="inv-section">
-            <h3>EQUIPPED</h3>
-            {(['weapon', 'armor', 'accessory'] as const).map(slot => {
-              const equip = gameState.player.equipment[slot];
-              const def = equip ? getItemDef(equip.defId) : null;
-              return (
-                <div key={slot} className="inv-equip-slot">
-                  <span className="equip-label">{slot.toUpperCase()}</span>
-                  {def ? (
-                    <span className="equip-item" style={{ color: getRarityColor(def.rarity) }}>
-                      {def.icon} {def.name}
-                      {def.atkBonus ? ` +${def.atkBonus} ATK` : ''}
-                      {def.defBonus ? ` +${def.defBonus} DEF` : ''}
-                      {def.hpBonus ? ` +${def.hpBonus} HP` : ''}
-                    </span>
-                  ) : (
-                    <span className="equip-empty">— empty —</span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Stats */}
-          <div className="inv-section">
-            <h3>STATS</h3>
-            <div className="inv-stats">
-              <span>ATK: {stats.atk}</span>
-              <span>DEF: {stats.def}</span>
-              <span>HP: {gameState.player.hp}/{stats.maxHp}</span>
-              <span>LV: {gameState.player.level}</span>
-            </div>
-          </div>
-
-          {/* Inventory items */}
-          <div className="inv-section">
-            <h3>ITEMS</h3>
-            {gameState.player.inventory.length === 0 ? (
-              <p className="inv-empty">No items. Explore the dungeon!</p>
-            ) : (
-              <div className="inv-grid">
-                {gameState.player.inventory.map((item, idx) => {
-                  const def = getItemDef(item.defId);
-                  if (!def) return null;
-                  const isSelected = selectedInventoryIdx === idx;
-                  return (
-                    <div key={idx}>
-                      <div
-                        className={`inv-item ${isSelected ? 'selected' : ''}`}
-                        style={{ borderColor: getRarityColor(def.rarity) + '60' }}
-                        onClick={() => setSelectedInventoryIdx(isSelected ? null : idx)}
-                      >
-                        <span className="inv-item-icon">{def.icon}</span>
-                        <div className="inv-item-info">
-                          <span className="inv-item-name" style={{ color: getRarityColor(def.rarity) }}>{def.name}</span>
-                          <span className="inv-item-desc">{def.description}</span>
-                        </div>
-                      </div>
-                      {isSelected && (
-                        <div className="inv-actions">
-                          <button className="inv-btn use" onClick={() => handleUseItem(idx)}>
-                            {def.type === 'equipment' ? 'EQUIP' : 'USE'}
-                          </button>
-                          <button className="inv-btn drop" onClick={() => handleDropItem(idx)}>DROP</button>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+        {highScores.length > 0 && (
+          <div className="high-scores">
+            <h3>High Scores</h3>
+            {highScores.map((score, i) => (
+              <div key={i} className="score-line">
+                {i + 1}. {score.className} - {score.score} pts (Floor {score.floor}, Lv{score.level})
               </div>
-            )}
+            ))}
           </div>
+        )}
+      </div>
+    );
+  };
 
-          {gameState.player.keys > 0 && (
-            <div className="inv-keys">🗝️ Keys: {gameState.player.keys}</div>
-          )}
+  const renderClassSelect = () => {
+    return (
+      <div className="screen screen-class-select">
+        <h1>SELECT YOUR CLASS</h1>
+        <div className="class-grid">
+          {PLAYER_CLASSES.map(cls => {
+            const isLocked = !meta?.unlockedClasses.includes(cls.id);
+            const isSelected = selectedClass === cls.id;
 
-          <button className="menu-btn primary" onClick={() => { setScreen('game'); setSelectedInventoryIdx(null); }}>
-            CLOSE (I)
+            return (
+              <div key={cls.id} className={`class-card ${isSelected ? 'selected' : ''} ${isLocked ? 'locked' : ''}`}>
+                <div className="class-icon">{cls.icon}</div>
+                <div className="class-name">{cls.name}</div>
+                <div className="class-desc">{cls.description}</div>
+                <div className="class-stats">
+                  <div>HP: {cls.baseStats.hp}</div>
+                  <div>MP: {cls.baseStats.mp}</div>
+                  <div>ATK: {cls.baseStats.atk}</div>
+                  <div>DEF: {cls.baseStats.def}</div>
+                </div>
+                <div className="class-passive">{cls.passive}</div>
+
+                {isLocked ? (
+                  <div className="lock-info">🔒 Locked (Cost: {cls.baseStats.hp * 100} souls)</div>
+                ) : (
+                  <button
+                    className={`btn btn-small ${isSelected ? 'btn-selected' : ''}`}
+                    onClick={() => setSelectedClass(cls.id)}
+                  >
+                    SELECT
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="class-buttons">
+          <button className="btn btn-primary" onClick={() => startNewGame(selectedClass)}>
+            START GAME
+          </button>
+          <button className="btn btn-secondary" onClick={() => setScreen('menu')}>
+            BACK
           </button>
         </div>
       </div>
     );
-  }
+  };
 
-  // Main game screen
-  if (screen === 'game' && gameState) {
-    const { player, floor, enemies, items, floorNumber, turnCount, gameLog } = gameState;
-    const stats = getEffectiveStats(player);
+  const renderGame = () => {
+    if (!gameState) return null;
 
-    // Calculate viewport bounds (centered on player)
+    const { player, floor, enemies, items, floorNumber, biome, turnCount, gameLog } = gameState;
+    const biomeDef = getBiomeForFloor(floorNumber);
+
+    // Calculate viewport
     const halfW = Math.floor(VIEWPORT_W / 2);
     const halfH = Math.floor(VIEWPORT_H / 2);
     const camX = Math.max(0, Math.min(floor.width - VIEWPORT_W, player.pos.x - halfW));
     const camY = Math.max(0, Math.min(floor.height - VIEWPORT_H, player.pos.y - halfH));
 
-    // Build visible tile grid
+    // Build tile grid
     const tileGrid: React.ReactElement[] = [];
     for (let vy = 0; vy < VIEWPORT_H; vy++) {
       for (let vx = 0; vx < VIEWPORT_W; vx++) {
@@ -507,7 +388,6 @@ export default function GamePage() {
 
         let content = '';
         let tileClass = 'tile';
-        let extraStyle: React.CSSProperties = {};
 
         if (!isExplored) {
           tileClass += ' tile-void';
@@ -516,7 +396,8 @@ export default function GamePage() {
           content = getTileChar(tile);
         } else if (isPlayer) {
           tileClass += ' tile-player';
-          content = '🧙';
+          const classObj = PLAYER_CLASSES.find(c => c.id === gameState.classId);
+          content = classObj?.icon || '🧙';
         } else if (enemy) {
           const eDef = getEnemyDef(enemy.defId);
           tileClass += ' tile-enemy';
@@ -526,195 +407,500 @@ export default function GamePage() {
           const iDef = getItemDef(item.defId);
           tileClass += ' tile-item';
           content = iDef?.icon || '?';
-          extraStyle = { color: getRarityColor(iDef?.rarity || 'common') };
         } else {
           tileClass += ` ${getTileClass(tile)}`;
           content = getTileChar(tile);
         }
 
         tileGrid.push(
-          <div key={`${vx}-${vy}`} className={tileClass} style={extraStyle}>
+          <div key={`${vx}-${vy}`} className={tileClass}>
             {content}
           </div>
         );
       }
     }
 
-    // Recent log entries
-    const recentLog = gameLog.slice(-5).reverse();
-
-    // HP bar percentage
-    const hpPct = Math.max(0, (player.hp / stats.maxHp) * 100);
-    const xpPct = (player.xp / player.xpToNext) * 100;
-
     // Check if on stairs
     const onStairs = floor.tiles[player.pos.y][player.pos.x] === Tile.StairsDown;
 
+    // Adjacent enemies for info bar
+    const adjacentEnemies = [
+      { pos: { x: player.pos.x, y: player.pos.y - 1 }, dir: 'N' },
+      { pos: { x: player.pos.x, y: player.pos.y + 1 }, dir: 'S' },
+      { pos: { x: player.pos.x - 1, y: player.pos.y }, dir: 'W' },
+      { pos: { x: player.pos.x + 1, y: player.pos.y }, dir: 'E' },
+    ]
+      .map(({ pos, dir }) => {
+        const enemy = enemies.find(e => e.pos.x === pos.x && e.pos.y === pos.y && e.hp > 0);
+        return enemy ? { enemy, dir } : null;
+      })
+      .filter(Boolean) as { enemy: typeof enemies[0]; dir: string }[];
+
+    const xpPercent = (player.xp / player.xpToNext) * 100;
+    const hpPercent = (player.hp / player.maxHp) * 100;
+    const mpPercent = (player.mp / player.maxMp) * 100;
+
     return (
-      <div className="game-container game-screen" ref={gameRef} tabIndex={0} onKeyDown={handleKeyDown}>
-        <div className="scanline-overlay" />
-
-        {/* Top HUD */}
-        <div className="hud-top">
-          <div className="hud-floor">F{floorNumber}</div>
-          <div className="hud-title">THE UNDERGROWTH</div>
-          <div className="hud-turn">T{turnCount}</div>
+      <div className="screen screen-game" style={getBiomeCSS(biome)}>
+        <div className="game-header">
+          <div className="floor-info">
+            Floor {floorNumber} - {biomeDef.name}
+          </div>
+          <div className="game-title">THE UNDERGROWTH</div>
+          <div className="turn-info">Turn {turnCount}</div>
         </div>
 
-        {/* HP/XP bars */}
-        <div className="hud-bars">
-          <div className="bar-container">
-            <div className="bar-label">HP {player.hp}/{stats.maxHp}</div>
-            <div className="bar-track hp-track">
-              <div className="bar-fill hp-fill" style={{ width: `${hpPct}%` }} />
+        <div className="game-hud">
+          <div className="bars">
+            <div className="bar-group">
+              <div className="bar-label">HP</div>
+              <div className="bar-bg">
+                <div className="bar-fill" style={{ width: `${hpPercent}%` }} />
+              </div>
+              <div className="bar-text">
+                {player.hp}/{player.maxHp}
+              </div>
+            </div>
+
+            <div className="bar-group">
+              <div className="bar-label">XP</div>
+              <div className="bar-bg">
+                <div className="bar-fill" style={{ width: `${xpPercent}%` }} />
+              </div>
+              <div className="bar-text">
+                {player.xp}/{player.xpToNext}
+              </div>
+            </div>
+
+            <div className="bar-group">
+              <div className="bar-label">MP</div>
+              <div className="bar-bg">
+                <div className="bar-fill" style={{ width: `${mpPercent}%` }} />
+              </div>
+              <div className="bar-text">
+                {player.mp}/{player.maxMp}
+              </div>
             </div>
           </div>
-          <div className="bar-container">
-            <div className="bar-label">XP {player.xp}/{player.xpToNext}</div>
-            <div className="bar-track xp-track">
-              <div className="bar-fill xp-fill" style={{ width: `${xpPct}%` }} />
-            </div>
+
+          <div className="stats-bar">
+            <span>LV {player.level}</span>
+            <span>ATK {player.atk}</span>
+            <span>DEF {player.def}</span>
+            {player.statusEffects.length > 0 && <span>⚡ {player.statusEffects.length} effect{player.statusEffects.length > 1 ? 's' : ''}</span>}
+            {player.keys > 0 && <span>🔑 {player.keys}</span>}
           </div>
         </div>
 
-        {/* Stats bar */}
-        <div className="hud-stats">
-          <span>LV {player.level}</span>
-          <span>⚔️ {stats.atk}</span>
-          <span>🛡️ {stats.def}</span>
-          {player.statusEffects.length > 0 && (
-            <span className="status-icons">
-              {player.statusEffects.map((e, i) => (
-                <span key={i} className={`status-${e.type}`} title={`${e.type} (${e.turnsLeft}t)`}>
-                  {e.type === 'poison' ? '☠️' : e.type === 'regen' ? '💚' : e.type === 'strength' ? '💪' : e.type === 'shield' ? '🛡️' : e.type === 'haste' ? '⚡' : '❓'}
-                </span>
+        <div className="game-main">
+          <div className="viewport">{tileGrid}</div>
+
+          <div className="game-sidebar">
+            {onStairs && <div className="stairs-prompt">Press ENTER to descend</div>}
+
+            {adjacentEnemies.length > 0 && (
+              <div className="enemy-info">
+                <div className="enemy-title">Adjacent Enemies:</div>
+                {adjacentEnemies.map(({ enemy, dir }) => {
+                  const eDef = getEnemyDef(enemy.defId);
+                  return (
+                    <div key={`${enemy.defId}-${dir}`} className="enemy-line">
+                      {dir}: {eDef?.name || 'Unknown'} ({enemy.hp}/{enemy.maxHp})
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="game-log">
+              {gameLog.slice(-5).map((entry, i) => (
+                <div key={i} className={`log-entry log-${entry.type}`}>
+                  {entry.text}
+                </div>
               ))}
-            </span>
-          )}
-          {player.keys > 0 && <span>🗝️ {player.keys}</span>}
+            </div>
+          </div>
         </div>
 
-        {/* Game viewport */}
-        <div className="viewport-container">
-          <div
-            className="viewport"
-            style={{
-              gridTemplateColumns: `repeat(${VIEWPORT_W}, 1fr)`,
-              gridTemplateRows: `repeat(${VIEWPORT_H}, 1fr)`,
-            }}
-          >
-            {tileGrid}
+        <div className="action-bar">
+          <button className="action-btn" onClick={() => setScreen('inventory')} title="Inventory (I)">
+            📦
+          </button>
+          <button className="action-btn" onClick={() => setShowMinimap(!showMinimap)} title="Minimap (M)">
+            🗺️
+          </button>
+          <button className="action-btn" onClick={() => setScreen('help')} title="Help (H)">
+            ❓
+          </button>
+          <button className="action-btn" onClick={() => setScreen('soul_shop')} title="Soul Shop">
+            ⏳
+          </button>
+        </div>
+
+        {showMinimap && <div className="minimap-overlay">Minimap (press M to hide)</div>}
+      </div>
+    );
+  };
+
+  const renderInventory = () => {
+    if (!gameState) return null;
+
+    const { player } = gameState;
+
+    // Group items by defId
+    const grouped = new Map<string, number>();
+    player.inventory.forEach(item => {
+      grouped.set(item.defId, (grouped.get(item.defId) || 0) + 1);
+    });
+
+    return (
+      <div className="screen screen-inventory">
+        <h1>INVENTORY</h1>
+
+        <div className="inventory-content">
+          <div className="inv-section">
+            <h3>Equipment</h3>
+            <div className="equipment-grid">
+              <div className={`equipment-slot ${player.equipment.weapon ? 'equipped' : ''}`}>
+                <div className="slot-name">Weapon</div>
+                {player.equipment.weapon ? (
+                  <>
+                    <div>{getItemDef(player.equipment.weapon.defId)?.icon || '?'}</div>
+                    <div className="slot-item">{getItemDef(player.equipment.weapon.defId)?.name}</div>
+                  </>
+                ) : (
+                  <div>-</div>
+                )}
+              </div>
+              <div className={`equipment-slot ${player.equipment.armor ? 'equipped' : ''}`}>
+                <div className="slot-name">Armor</div>
+                {player.equipment.armor ? (
+                  <>
+                    <div>{getItemDef(player.equipment.armor.defId)?.icon || '?'}</div>
+                    <div className="slot-item">{getItemDef(player.equipment.armor.defId)?.name}</div>
+                  </>
+                ) : (
+                  <div>-</div>
+                )}
+              </div>
+              <div className={`equipment-slot ${player.equipment.accessory ? 'equipped' : ''}`}>
+                <div className="slot-name">Accessory</div>
+                {player.equipment.accessory ? (
+                  <>
+                    <div>{getItemDef(player.equipment.accessory.defId)?.icon || '?'}</div>
+                    <div className="slot-item">{getItemDef(player.equipment.accessory.defId)?.name}</div>
+                  </>
+                ) : (
+                  <div>-</div>
+                )}
+              </div>
+            </div>
           </div>
 
-          {/* Stairs prompt */}
-          {onStairs && !gameState.gameOver && (
-            <div className="stairs-prompt">
-              Press ENTER or ▼ to descend
+          <div className="inv-section">
+            <h3>Stats</h3>
+            <div className="stats-grid">
+              <div>HP: {player.hp}/{player.maxHp}</div>
+              <div>MP: {player.mp}/{player.maxMp}</div>
+              <div>ATK: {player.atk}</div>
+              <div>DEF: {player.def}</div>
+              <div>Level: {player.level}</div>
+              <div>Inventory: {player.inventory.length}/{player.maxInventory}</div>
             </div>
-          )}
+          </div>
 
-          {/* Game over overlay */}
-          {gameState.gameOver && (
-            <div className="game-overlay death-overlay">
-              <div className="overlay-text">💀 YOU DIED</div>
+          <div className="inv-section">
+            <h3>Items ({player.inventory.length}/{player.maxInventory})</h3>
+            <div className="items-grid">
+              {Array.from(grouped.entries()).map(([defId, count]) => {
+                const itemDef = getItemDef(defId);
+                const firstIndex = player.inventory.findIndex(i => i.defId === defId);
+
+                return (
+                  <div key={defId} className="item-stack">
+                    <div className="item-icon">{itemDef?.icon || '?'}</div>
+                    <div className="item-name">{itemDef?.name || 'Unknown'}</div>
+                    {count > 1 && <div className="item-count">x{count}</div>}
+                    <div className="item-buttons">
+                      <button
+                        className="btn btn-small"
+                        onClick={() => {
+                          const newState = useItem(gameState, firstIndex);
+                          setGameState(newState);
+                          if (soundEnabled) sfxUseItem();
+                        }}
+                      >
+                        USE
+                      </button>
+                      <button
+                        className="btn btn-small"
+                        onClick={() => {
+                          const newState = dropItem(gameState, firstIndex);
+                          setGameState(newState);
+                        }}
+                      >
+                        DROP
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-          )}
-          {gameState.victory && (
-            <div className="game-overlay victory-overlay">
-              <div className="overlay-text">🏆 VICTORY!</div>
-            </div>
-          )}
+          </div>
         </div>
 
-        {/* Minimap */}
-        {showMinimap && (
-          <div className="minimap-overlay">
-            <div className="minimap" style={{
-              gridTemplateColumns: `repeat(${floor.width}, 3px)`,
-              gridTemplateRows: `repeat(${floor.height}, 3px)`,
-            }}>
-              {Array.from({ length: floor.height }).map((_, my) =>
-                Array.from({ length: floor.width }).map((_, mx) => {
-                  const isPlayerMM = mx === player.pos.x && my === player.pos.y;
-                  const isExploredMM = floor.explored[my][mx];
-                  const tileMM = floor.tiles[my][mx];
-                  let mmClass = 'mm-tile';
-                  if (isPlayerMM) mmClass += ' mm-player';
-                  else if (!isExploredMM) mmClass += ' mm-void';
-                  else if (tileMM === Tile.Wall) mmClass += ' mm-wall';
-                  else if (tileMM === Tile.StairsDown) mmClass += ' mm-stairs';
-                  else mmClass += ' mm-floor';
-                  return <div key={`mm-${mx}-${my}`} className={mmClass} />;
-                })
-              )}
+        <button className="btn btn-secondary" onClick={() => setScreen('game')}>
+          CLOSE (I)
+        </button>
+      </div>
+    );
+  };
+
+  const renderSoulShop = () => {
+    return (
+      <div className="screen screen-soul-shop">
+        <h1>SOUL SHOP</h1>
+        <div className="souls-display">Current Souls: {meta?.souls || 0}</div>
+
+        <div className="shop-content">
+          <div className="shop-section">
+            <h2>Upgrades</h2>
+            <div className="upgrades-grid">
+              {META_UPGRADES.map(upgrade => {
+                const currentLevel = meta?.upgrades[upgrade.id] || 0;
+                const isMaxed = currentLevel >= upgrade.maxLevel;
+                const cost = isMaxed ? 0 : 50 + currentLevel * 25; // placeholder cost calc
+                const canAfford = !isMaxed && (meta?.souls || 0) >= cost;
+
+                return (
+                  <div key={upgrade.id} className="upgrade-card">
+                    <div className="upgrade-icon">{upgrade.icon}</div>
+                    <div className="upgrade-name">{upgrade.name}</div>
+                    <div className="upgrade-desc">{upgrade.description}</div>
+                    <div className="upgrade-level">
+                      {Array.from({ length: upgrade.maxLevel }).map((_, i) => (
+                        <span key={i} className={i < currentLevel ? 'pip-filled' : 'pip-empty'}>
+                          ●
+                        </span>
+                      ))}
+                    </div>
+                    <button
+                      className={`btn btn-small ${!canAfford ? 'btn-disabled' : ''}`}
+                      disabled={!canAfford}
+                      onClick={() => {
+                        if (meta && canAfford) {
+                          const updatedMeta = { ...meta };
+                          updatedMeta.upgrades[upgrade.id] = currentLevel + 1;
+                          updatedMeta.souls -= cost;
+                          saveMeta(updatedMeta);
+                          setMeta(updatedMeta);
+                        }
+                      }}
+                    >
+                      {isMaxed ? 'MAXED' : `BUY (${cost})`}
+                    </button>
+                  </div>
+                );
+              })}
             </div>
+          </div>
+
+          <div className="shop-section">
+            <h2>Classes</h2>
+            <div className="classes-grid">
+              {PLAYER_CLASSES.map(cls => {
+                const isUnlocked = meta?.unlockedClasses.includes(cls.id);
+                const cost = cls.baseStats.hp * 100; // placeholder
+
+                return (
+                  <div key={cls.id} className="class-shop-card">
+                    <div className="class-icon">{cls.icon}</div>
+                    <div className="class-name">{cls.name}</div>
+                    <button
+                      className={`btn btn-small ${isUnlocked ? 'btn-disabled' : ''}`}
+                      disabled={isUnlocked || (meta?.souls || 0) < cost}
+                      onClick={() => {
+                        if (meta && !isUnlocked && meta.souls >= cost) {
+                          const updatedMeta = { ...meta };
+                          updatedMeta.unlockedClasses.push(cls.id);
+                          updatedMeta.souls -= cost;
+                          saveMeta(updatedMeta);
+                          setMeta(updatedMeta);
+                        }
+                      }}
+                    >
+                      {isUnlocked ? 'UNLOCKED' : `UNLOCK (${cost})`}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        <button className="btn btn-secondary" onClick={() => setScreen(gameState ? 'game' : 'menu')}>
+          BACK
+        </button>
+      </div>
+    );
+  };
+
+  const renderAchievements = () => {
+    const unlockedCount = Object.values(meta?.achievements || {}).filter(Boolean).length;
+
+    return (
+      <div className="screen screen-achievements">
+        <h1>ACHIEVEMENTS</h1>
+        <div className="achievements-count">
+          {unlockedCount} / {ACHIEVEMENTS.length} Unlocked
+        </div>
+
+        <div className="achievements-grid">
+          {ACHIEVEMENTS.map(ach => {
+            const isUnlocked = meta?.achievements[ach.id] || false;
+
+            return (
+              <div key={ach.id} className={`achievement-card ${isUnlocked ? 'unlocked' : 'locked'}`}>
+                <div className="ach-icon">{ach.icon}</div>
+                <div className="ach-name">{ach.name}</div>
+                <div className="ach-desc">{isUnlocked ? ach.description : '???'}</div>
+                {isUnlocked && (
+                  <div className="ach-reward">
+                    Reward: {ach.reward.type === 'souls' ? `${ach.reward.value} souls` : String(ach.reward.value)}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <button className="btn btn-secondary" onClick={() => setScreen(gameState ? 'game' : 'menu')}>
+          BACK
+        </button>
+      </div>
+    );
+  };
+
+  const renderHelp = () => {
+    return (
+      <div className="screen screen-help">
+        <h1>HOW TO PLAY</h1>
+
+        <div className="help-content">
+          <section>
+            <h2>Movement</h2>
+            <p>Use WASD or Arrow Keys for cardinal movement</p>
+            <p>Use Q, E, Z, C for diagonal movement</p>
+            <p>Press Space or . to wait a turn</p>
+          </section>
+
+          <section>
+            <h2>Actions</h2>
+            <p>Press ENTER to descend stairs to the next floor</p>
+            <p>Press I to open/close inventory</p>
+            <p>Press M to toggle minimap</p>
+          </section>
+
+          <section>
+            <h2>Dungeon</h2>
+            <p>Descend 30 floors through 5 different biomes</p>
+            <p>Explore, collect loot, defeat enemies, and grow stronger</p>
+            <p>Reach the deepest floor to achieve victory</p>
+          </section>
+
+          <section>
+            <h2>Biomes</h2>
+            <ul>
+              <li>Shallow Caves (Floors 1-6)</li>
+              <li>Fungal Forest (Floors 7-12)</li>
+              <li>Crystal Caverns (Floors 13-18)</li>
+              <li>Lava Depths (Floors 19-24)</li>
+              <li>The Abyss (Floors 25-30)</li>
+            </ul>
+          </section>
+
+          <section>
+            <h2>Meta Progression</h2>
+            <p>Collect souls to unlock upgrades and new classes</p>
+            <p>Visit the Soul Shop from the main menu</p>
+            <p>Track your achievements for extra rewards</p>
+          </section>
+        </div>
+
+        <button className="btn btn-secondary" onClick={() => setScreen(gameState ? 'game' : 'menu')}>
+          BACK (ESC)
+        </button>
+      </div>
+    );
+  };
+
+  const renderGameOver = () => {
+    if (!gameState) return null;
+
+    const finalScore = calculateScore(gameState);
+    const classObj = PLAYER_CLASSES.find(c => c.id === gameState.classId);
+    const souls = calculateSoulsEarned(gameState);
+
+    return (
+      <div className="screen screen-gameover">
+        <div className="gameover-header">
+          {gameState.victory ? <div className="gameover-icon">🏆</div> : <div className="gameover-icon">💀</div>}
+          <h1>{gameState.victory ? 'VICTORY!' : 'GAME OVER'}</h1>
+        </div>
+
+        <div className="gameover-stats">
+          <div className="stat-line">Score: {finalScore}</div>
+          <div className="stat-line">Floor: {gameState.deepestFloor}/30</div>
+          <div className="stat-line">Level: {gameState.player.level}</div>
+          <div className="stat-line">Kills: {gameState.killCount}</div>
+          <div className="stat-line">Turns: {gameState.turnCount}</div>
+          <div className="stat-line">Class: {classObj?.name || 'Unknown'}</div>
+          <div className="stat-line highlight">Souls Earned: +{souls}</div>
+        </div>
+
+        {newlyUnlockedAchievements.length > 0 && (
+          <div className="new-achievements">
+            <h3>New Achievements Unlocked!</h3>
+            {newlyUnlockedAchievements.map(ach => (
+              <div key={ach.id} className="new-ach">
+                {ach.icon} {ach.name}
+              </div>
+            ))}
           </div>
         )}
 
-        {/* Game log */}
-        <div className="game-log">
-          {recentLog.map((entry, i) => (
-            <div key={gameLog.length - i} className={`log-entry log-${entry.type}`} style={{ opacity: 1 - i * 0.15 }}>
-              {entry.text}
-            </div>
-          ))}
-        </div>
-
-        {/* Enemy info (if visible enemy nearby) */}
-        {(() => {
-          const nearbyEnemy = enemies.find(e =>
-            e.hp > 0 &&
-            floor.visible[e.pos.y]?.[e.pos.x] &&
-            Math.abs(e.pos.x - player.pos.x) <= 1 &&
-            Math.abs(e.pos.y - player.pos.y) <= 1
-          );
-          if (!nearbyEnemy) return null;
-          const eDef = getEnemyDef(nearbyEnemy.defId);
-          if (!eDef) return null;
-          const eHpPct = (nearbyEnemy.hp / nearbyEnemy.maxHp) * 100;
-          return (
-            <div className={`enemy-info ${eDef.isBoss ? 'boss-info' : ''}`}>
-              <span className="ei-name">{eDef.icon} {eDef.name}</span>
-              <div className="ei-hp-bar">
-                <div className="ei-hp-fill" style={{ width: `${eHpPct}%` }} />
-              </div>
-              <span className="ei-hp">{nearbyEnemy.hp}/{nearbyEnemy.maxHp}</span>
-            </div>
-          );
-        })()}
-
-        {/* Mobile controls */}
-        <div className="mobile-controls">
-          <div className="dpad">
-            <button className="dpad-btn dpad-up" onClick={() => handleMobileDir('up')}>▲</button>
-            <button className="dpad-btn dpad-left" onClick={() => handleMobileDir('left')}>◄</button>
-            <button className="dpad-btn dpad-center" onClick={() => handleMobileDir('wait')}>
-              {onStairs ? '▼' : '·'}
+        <div className="gameover-buttons">
+          <button className="btn btn-primary" onClick={() => startNewGame(gameState.classId)}>
+            TRY AGAIN
+          </button>
+          {gameState.victory && (
+            <button className="btn btn-secondary" onClick={() => startNewGame(gameState.classId)}>
+              CONTINUE DESCENT
             </button>
-            <button className="dpad-btn dpad-right" onClick={() => handleMobileDir('right')}>►</button>
-            <button className="dpad-btn dpad-down" onClick={() => handleMobileDir('down')}>▼</button>
-          </div>
-          <div className="mobile-actions">
-            <button className="mob-btn" onClick={() => setScreen('inventory')}>📦</button>
-            <button className="mob-btn" onClick={() => setShowMinimap(p => !p)}>🗺️</button>
-            <button className="mob-btn" onClick={() => setScreen('help')}>❓</button>
-          </div>
+          )}
+          <button className="btn btn-secondary" onClick={() => setScreen('soul_shop')}>
+            SOUL SHOP
+          </button>
+          <button className="btn btn-secondary" onClick={() => setScreen('menu')}>
+            MAIN MENU
+          </button>
         </div>
       </div>
     );
-  }
+  };
 
-  // Fallback
+  // === MAIN RENDER ===
+
   return (
     <div className="game-container">
-      <div className="scanline-overlay" />
-      <div className="menu-content">
-        <div className="menu-title-area">
-          <div className="menu-mushroom">🍄</div>
-          <h1 className="menu-title">THE UNDERGROWTH</h1>
-        </div>
-        <button className="menu-btn primary" onClick={startGame}>START</button>
-      </div>
+      {screen === 'menu' && renderMenu()}
+      {screen === 'class_select' && renderClassSelect()}
+      {screen === 'game' && renderGame()}
+      {screen === 'inventory' && renderInventory()}
+      {screen === 'soul_shop' && renderSoulShop()}
+      {screen === 'achievements' && renderAchievements()}
+      {screen === 'help' && renderHelp()}
+      {screen === 'gameover' && renderGameOver()}
     </div>
   );
 }

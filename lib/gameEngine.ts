@@ -1,35 +1,53 @@
 // ============================================
-// THE UNDERGROWTH — Core Game Engine
+// THE UNDERGROWTH — Core Game Engine (Updated)
 // Handles state transitions, combat, AI, items
+// Integrated: Biomes, Classes, Meta System
 // ============================================
 
 import {
   GameState, PlayerState, EnemyInstance, ItemInstance,
-  Direction, DIR_OFFSETS, Tile, LogEntry, StatusEffect, Pos,
+  Direction, DIR_OFFSETS, Tile, LogEntry, StatusEffect, Pos, BiomeType,
 } from './types';
 import { generateFloor, findSpawnPos, findRandomWalkable, isWalkable, inBounds, rng, rngInt, pick } from './dungeon';
 import { getEnemyDef, getItemDef, getEnemiesForFloor, getBossForFloor, getItemsForFloor, scaleEnemyStats, ITEMS } from './entities';
 import { computeFOV, revealMap, hasLOS, distance } from './fov';
+import { getBiomeForFloor } from './biomes';
+import { PLAYER_CLASSES, applyMetaBonuses, loadMeta, META_UPGRADES } from './meta';
 
 // --- XP curve ---
 function xpForLevel(level: number): number {
   return Math.floor(20 * Math.pow(level, 1.8));
 }
 
+// --- Boss floors: 6, 12, 18, 24, 30 (and repeats every 6 in endless) ---
+function isBossFloor(floorNum: number): boolean {
+  if (floorNum <= 30) {
+    return [6, 12, 18, 24, 30].includes(floorNum);
+  }
+  // Endless: bosses repeat every 6 floors
+  const offset = floorNum - 30;
+  return (offset % 6) === 0;
+}
+
 // --- Create initial game state ---
-export function createNewGame(): GameState {
+export function createNewGame(classId: string = 'explorer'): GameState {
+  // Load class definition
+  const playerClass = PLAYER_CLASSES.find(c => c.id === classId) || PLAYER_CLASSES[0];
+
+  // Initialize floor and player position
   const floor = generateFloor(1);
   const startRoom = floor.rooms[0];
   const playerPos = { x: startRoom.centerX, y: startRoom.centerY };
 
+  // Create base player from class
   const player: PlayerState = {
     pos: playerPos,
-    hp: 40,
-    maxHp: 40,
-    mp: 10,
-    maxMp: 10,
-    atk: 5,
-    def: 2,
+    hp: playerClass.baseStats.hp,
+    maxHp: playerClass.baseStats.hp,
+    mp: playerClass.baseStats.mp,
+    maxMp: playerClass.baseStats.mp,
+    atk: playerClass.baseStats.atk,
+    def: playerClass.baseStats.def,
     level: 1,
     xp: 0,
     xpToNext: xpForLevel(2),
@@ -40,6 +58,33 @@ export function createNewGame(): GameState {
     keys: 0,
   };
 
+  // Load meta and apply bonuses
+  const meta = loadMeta();
+  const playerWithMetaBonuses = applyMetaBonuses(player, meta, classId);
+
+  // Add starting item from class
+  let startingItems: ItemInstance[] = [];
+  if (playerClass.startingItem) {
+    startingItems.push({ defId: playerClass.startingItem });
+  }
+
+  // Add starting items from meta 'starting_kit' upgrade
+  const startingKitLevel = meta.upgrades['starting_kit'] || 0;
+  if (startingKitLevel >= 1) {
+    startingItems.push({ defId: 'healing_moss' });
+  }
+  if (startingKitLevel >= 2) {
+    startingItems.push({ defId: 'strength_lichen' });
+  }
+  if (startingKitLevel >= 3) {
+    startingItems.push({ defId: 'stone_knife' });
+  }
+
+  const playerWithStartingItems = {
+    ...playerWithMetaBonuses,
+    inventory: startingItems,
+  };
+
   // Compute initial FOV
   computeFOV(floor, playerPos.x, playerPos.y);
 
@@ -47,15 +92,18 @@ export function createNewGame(): GameState {
   const enemies = spawnEnemies(floor, 1, [playerPos]);
   const items = spawnItems(floor, 1, [playerPos, ...enemies.map(e => e.pos)]);
 
+  // Get biome for floor 1
+  const biome = getBiomeForFloor(1);
+
   const state: GameState = {
-    player,
+    player: playerWithStartingItems,
     floor,
     floorNumber: 1,
     enemies,
     items,
     turnCount: 0,
     gameLog: [
-      { text: 'You descend into the Undergrowth...', type: 'system', turn: 0 },
+      { text: `You descend into the Undergrowth as a ${playerClass.name}...`, type: 'system', turn: 0 },
       { text: 'The bioluminescent glow reveals a network of caves ahead.', type: 'system', turn: 0 },
       { text: 'Use WASD or arrow keys to move. Bump into enemies to attack.', type: 'info', turn: 0 },
     ],
@@ -65,6 +113,10 @@ export function createNewGame(): GameState {
     killCount: 0,
     deepestFloor: 1,
     startTime: Date.now(),
+    biome: biome.id,
+    classId,
+    soulsEarned: 0,
+    isEndless: false,
   };
 
   return state;
@@ -169,7 +221,7 @@ function spawnItems(floor: ReturnType<typeof generateFloor>, floorNum: number, o
   return items;
 }
 
-// --- Get effective player stats (base + equipment) ---
+// --- Get effective player stats (base + equipment + class passive) ---
 export function getEffectiveStats(player: PlayerState): { atk: number; def: number; maxHp: number } {
   let atk = player.atk;
   let def = player.def;
@@ -200,6 +252,15 @@ export function getEffectiveStats(player: PlayerState): { atk: number; def: numb
 // --- Process a player action ---
 export function processAction(state: GameState, direction: Direction): GameState {
   if (state.gameOver) return state;
+
+  // Handle descending to next floor
+  if (direction === 'descend') {
+    const tile = state.floor.tiles[state.player.pos.y][state.player.pos.x];
+    if (tile === Tile.StairsDown) {
+      return descendFloor(state);
+    }
+    return state;
+  }
 
   const newState = { ...state };
   const offset = DIR_OFFSETS[direction];
@@ -248,6 +309,25 @@ export function processAction(state: GameState, direction: Direction): GameState
         newState.player = { ...newPlayer, keys: newPlayer.keys + 1 };
         newState.items = state.items.filter((_, idx) => idx !== itemIdx);
         log.push({ text: `Picked up ${def.icon} ${def.name}!`, type: 'pickup', turn });
+      } else if (def.type === 'consumable' || def.type === 'scroll') {
+        // Check if same defId exists in inventory (stacking)
+        const existingIdx = newPlayer.inventory.findIndex(invItem => invItem.defId === item.defId);
+        if (existingIdx >= 0) {
+          // Stack: just remove from ground, inventory stays as-is (UI groups by defId)
+          newState.items = state.items.filter((_, idx) => idx !== itemIdx);
+          log.push({ text: `Picked up ${def.icon} ${def.name}`, type: 'pickup', turn });
+          newState.player = newPlayer;
+        } else if (newPlayer.inventory.length < newPlayer.maxInventory) {
+          // Add new stack
+          newState.player = {
+            ...newPlayer,
+            inventory: [...newPlayer.inventory, { defId: item.defId }],
+          };
+          newState.items = state.items.filter((_, idx) => idx !== itemIdx);
+          log.push({ text: `Picked up ${def.icon} ${def.name}`, type: 'pickup', turn });
+        } else {
+          log.push({ text: `Inventory full! Can't pick up ${def.name}.`, type: 'info', turn });
+        }
       } else if (newPlayer.inventory.length < newPlayer.maxInventory) {
         newState.player = {
           ...newPlayer,
@@ -282,9 +362,19 @@ function processCombat(state: GameState, enemyIdx: number, turn: number, log: Lo
   const enemy = { ...state.enemies[enemyIdx] };
   const enemyDef = getEnemyDef(enemy.defId);
   const playerStats = getEffectiveStats(state.player);
+  const playerClass = PLAYER_CLASSES.find(c => c.id === state.classId);
 
-  // Player attacks
-  const rawDmg = Math.max(1, playerStats.atk - enemy.def + rngInt(-1, 2));
+  // Player attacks with crit chance
+  let rawDmg = Math.max(1, playerStats.atk - enemy.def + rngInt(-1, 2));
+
+  // Apply crit chance from class passive
+  if (playerClass && playerClass.passiveEffect.type === 'crit_chance') {
+    if (rng() < (playerClass.passiveEffect.value / 100)) {
+      rawDmg *= 2;
+      log.push({ text: '⚡ CRITICAL HIT!', type: 'combat', turn });
+    }
+  }
+
   enemy.hp -= rawDmg;
   log.push({
     text: `You hit ${enemyDef?.icon || '?'} ${enemyDef?.name || 'enemy'} for ${rawDmg} damage!`,
@@ -295,11 +385,30 @@ function processCombat(state: GameState, enemyIdx: number, turn: number, log: Lo
   if (enemy.hp <= 0) {
     // Enemy defeated
     const xpGain = enemyDef?.xpReward || 10;
+
+    // Apply xp_bonus from class passive
+    let actualXpGain = xpGain;
+    if (playerClass && playerClass.passiveEffect.type === 'xp_bonus') {
+      const bonusMultiplier = 1 + (playerClass.passiveEffect.value / 100);
+      actualXpGain = Math.floor(xpGain * bonusMultiplier);
+    }
+
     log.push({
-      text: `${enemyDef?.icon || '?'} ${enemyDef?.name || 'enemy'} defeated! (+${xpGain} XP)`,
+      text: `${enemyDef?.icon || '?'} ${enemyDef?.name || 'enemy'} defeated! (+${actualXpGain} XP)`,
       type: 'combat',
       turn,
     });
+
+    // Calculate souls earned: 1 soul per 10 XP
+    let soulsEarned = Math.floor(xpGain / 10);
+
+    // Apply soul_magnet meta upgrade bonus
+    const meta = loadMeta();
+    const soulMagnetLevel = meta.upgrades['soul_magnet'] || 0;
+    if (soulMagnetLevel > 0) {
+      const soulBonus = 1 + (soulMagnetLevel * 0.1);
+      soulsEarned = Math.floor(soulsEarned * soulBonus);
+    }
 
     // Drop items
     if (enemyDef?.drops) {
@@ -320,20 +429,26 @@ function processCombat(state: GameState, enemyIdx: number, turn: number, log: Lo
     newState.enemies = newEnemies;
     newState.killCount = state.killCount + 1;
     newState.score = state.score + (enemyDef?.xpReward || 10) * 10;
+    newState.soulsEarned = state.soulsEarned + soulsEarned;
 
     // Grant XP and check for level up
-    newState.player = grantXP(state.player, xpGain, log, turn);
+    newState.player = grantXP(state.player, actualXpGain, log, turn);
 
     // Boss kill — special message
     if (enemyDef?.isBoss) {
       log.push({ text: `⚔️ BOSS DEFEATED: ${enemyDef.bossTitle}! ⚔️`, type: 'boss', turn });
       newState.score += 500;
+      newState.soulsEarned = state.soulsEarned + soulsEarned + 50; // bonus souls for boss
 
-      // Final boss = victory
-      if (enemyDef.id === 'boss_abyssal_maw') {
+      // Final boss at floor 30: check if player wants to continue or victory
+      if (state.floorNumber === 30 && enemyDef.id === 'boss_abyssal_maw') {
         log.push({ text: '🏆 YOU HAVE CONQUERED THE UNDERGROWTH! 🏆', type: 'boss', turn });
+        log.push({ text: 'Continue descending into the endless depths?', type: 'system', turn });
         newState.victory = true;
         newState.score += 5000;
+      } else if (enemyDef.id === 'boss_abyssal_maw' && newState.isEndless) {
+        // Endless mode: defeated abyssal maw again
+        log.push({ text: `⚔️ ${enemyDef.bossTitle} falls once more! ⚔️`, type: 'boss', turn });
       }
     }
   } else {
@@ -349,6 +464,7 @@ function processCombat(state: GameState, enemyIdx: number, turn: number, log: Lo
     gameLog: [...state.gameLog, ...log],
   }, log);
 }
+
 
 // --- Grant XP and handle level ups ---
 function grantXP(player: PlayerState, xp: number, log: LogEntry[], turn: number): PlayerState {
@@ -411,6 +527,7 @@ function finalizeTurn(state: GameState, log: LogEntry[]): GameState {
 function processEnemyTurns(state: GameState, log: LogEntry[], turn: number): GameState {
   let newState = { ...state };
   const newEnemies = [...state.enemies];
+  const playerClass = PLAYER_CLASSES.find(c => c.id === state.classId);
 
   for (let i = 0; i < newEnemies.length; i++) {
     const enemy = { ...newEnemies[i] };
@@ -458,13 +575,31 @@ function processEnemyTurns(state: GameState, log: LogEntry[], turn: number): Gam
     if (dist === 1 && canSeePlayer) {
       // Adjacent to player — attack!
       const playerStats = getEffectiveStats(newState.player);
-      const rawDmg = Math.max(1, enemy.atk - playerStats.def + rngInt(-1, 1));
+      let rawDmg = Math.max(1, enemy.atk - playerStats.def + rngInt(-1, 1));
+
+      // Apply player dodge from class passive
+      if (playerClass && playerClass.passiveEffect.type === 'dodge') {
+        if (rng() < (playerClass.passiveEffect.value / 100)) {
+          rawDmg = 0;
+          log.push({ text: `${def.icon} ${def.name} attacks but you dodge!`, type: 'combat', turn });
+        }
+      }
+
+      // Apply thorns reflection from class passive
+      if (playerClass && playerClass.passiveEffect.type === 'thorns' && rawDmg > 0) {
+        const thornDmg = playerClass.passiveEffect.value;
+        enemy.hp -= thornDmg;
+        log.push({ text: `${def.icon} ${def.name} is hurt by your thorns! (${thornDmg} dmg)`, type: 'combat', turn });
+      }
+
       newState.player = { ...newState.player, hp: newState.player.hp - rawDmg };
-      log.push({
-        text: `${def.icon} ${def.name} hits you for ${rawDmg} damage!`,
-        type: 'combat',
-        turn,
-      });
+      if (rawDmg > 0) {
+        log.push({
+          text: `${def.icon} ${def.name} hits you for ${rawDmg} damage!`,
+          type: 'combat',
+          turn,
+        });
+      }
     } else if (canSeePlayer && (def.behavior === 'chase' || def.behavior === 'boss')) {
       // Move toward player
       const moved = moveToward(enemy, playerPos, state.floor, newEnemies, newState.player.pos);
@@ -615,6 +750,7 @@ function useEnemyAbility(
 function processStatusEffects(state: GameState, log: LogEntry[], turn: number): GameState {
   let player = { ...state.player };
   const newEffects: StatusEffect[] = [];
+  const playerClass = PLAYER_CLASSES.find(c => c.id === state.classId);
 
   for (const effect of player.statusEffects) {
     const remaining = { ...effect, turnsLeft: effect.turnsLeft - 1 };
@@ -624,12 +760,47 @@ function processStatusEffects(state: GameState, log: LogEntry[], turn: number): 
         player.hp -= effect.value;
         log.push({ text: `☠️ Poison deals ${effect.value} damage!`, type: 'combat', turn });
         break;
-      case 'regen':
-        const heal = Math.min(effect.value, player.maxHp - player.hp);
+      case 'regen': {
+        const playerStats = getEffectiveStats(player);
+        let heal = Math.min(effect.value, playerStats.maxHp - player.hp);
+
+        // Apply heal_bonus from class passive
+        if (playerClass && playerClass.passiveEffect.type === 'heal_bonus') {
+          const bonusMultiplier = 1 + (playerClass.passiveEffect.value / 100);
+          heal = Math.floor(heal * bonusMultiplier);
+        }
+
         if (heal > 0) {
           player.hp += heal;
           log.push({ text: `💚 Regeneration heals ${heal} HP.`, type: 'info', turn });
         }
+        break;
+      }
+      case 'fire_aura': {
+        // Deal damage to adjacent enemies
+        const playerPos = player.pos;
+        const damageDone: string[] = [];
+        for (const enemy of state.enemies) {
+          const dist = distance(playerPos.x, playerPos.y, enemy.pos.x, enemy.pos.y);
+          if (dist === 1 && enemy.hp > 0) {
+            const dmg = effect.value;
+            enemy.hp -= dmg;
+            const enemyDef = getEnemyDef(enemy.defId);
+            damageDone.push(`${enemyDef?.name || 'enemy'}`);
+          }
+        }
+        if (damageDone.length > 0) {
+          log.push({ text: `🔥 Fire aura burns ${damageDone.join(', ')} for ${effect.value} damage!`, type: 'combat', turn });
+        }
+        break;
+      }
+      case 'cure_poison':
+        // Remove poison effects
+        player.statusEffects = player.statusEffects.filter(e => e.type !== 'poison');
+        log.push({ text: `💊 Poison cured!`, type: 'info', turn });
+        break;
+      case 'invulnerable':
+        // Handled in enemy attack logic
         break;
     }
 
@@ -656,12 +827,20 @@ export function useItem(state: GameState, inventoryIdx: number): GameState {
   const turn = state.turnCount;
   let newState = { ...state };
   let player = { ...state.player };
+  const playerClass = PLAYER_CLASSES.find(c => c.id === state.classId);
 
   switch (def.type) {
     case 'consumable': {
       // Heal
       if (def.healAmount) {
-        const actualHeal = Math.min(def.healAmount, getEffectiveStats(player).maxHp - player.hp);
+        let actualHeal = Math.min(def.healAmount, getEffectiveStats(player).maxHp - player.hp);
+
+        // Apply heal_bonus from class passive
+        if (playerClass && playerClass.passiveEffect.type === 'heal_bonus') {
+          const bonusMultiplier = 1 + (playerClass.passiveEffect.value / 100);
+          actualHeal = Math.floor(actualHeal * bonusMultiplier);
+        }
+
         player.hp += actualHeal;
         log.push({ text: `Used ${def.icon} ${def.name}. Healed ${actualHeal} HP!`, type: 'pickup', turn });
       }
@@ -792,6 +971,13 @@ export function descendFloor(state: GameState): GameState {
   if (tile !== Tile.StairsDown) return state;
 
   const nextFloorNum = state.floorNumber + 1;
+
+  // Check if this is the final boss and player wants to continue
+  if (nextFloorNum === 31 && !state.isEndless) {
+    // This is the transition: player has just beaten floor 30 boss
+    // Set isEndless flag and continue
+  }
+
   const newFloor = generateFloor(nextFloorNum);
   const startRoom = newFloor.rooms[0];
   const playerPos = { x: startRoom.centerX, y: startRoom.centerY };
@@ -801,7 +987,10 @@ export function descendFloor(state: GameState): GameState {
   const enemies = spawnEnemies(newFloor, nextFloorNum, [playerPos]);
   const items = spawnItems(newFloor, nextFloorNum, [playerPos, ...enemies.map(e => e.pos)]);
 
-  const boss = getBossForFloor(nextFloorNum);
+  // Determine if this is a boss floor
+  const isBoss = isBossFloor(nextFloorNum);
+  const boss = isBoss ? getBossForFloor(nextFloorNum) : null;
+
   const bossLog: LogEntry[] = [];
   if (boss) {
     bossLog.push({
@@ -810,6 +999,15 @@ export function descendFloor(state: GameState): GameState {
       turn: state.turnCount,
     });
   }
+
+  // Update biome based on new floor
+  const newBiome = getBiomeForFloor(nextFloorNum);
+
+  // Determine if entering endless mode
+  const isNowEndless = nextFloorNum > 30 ? true : state.isEndless;
+
+  // Add floor cleared soul bonus
+  const soulsFromFloor = 10 + nextFloorNum;
 
   return {
     ...state,
@@ -820,9 +1018,12 @@ export function descendFloor(state: GameState): GameState {
     items,
     deepestFloor: Math.max(state.deepestFloor, nextFloorNum),
     score: state.score + nextFloorNum * 50,
+    soulsEarned: state.soulsEarned + soulsFromFloor,
+    biome: newBiome.id,
+    isEndless: isNowEndless,
     gameLog: [
       ...state.gameLog,
-      { text: `You descend to floor ${nextFloorNum}...`, type: 'system', turn: state.turnCount },
+      { text: `You descend to floor ${nextFloorNum}${isNowEndless ? ' (Endless Mode!)' : ''}...`, type: 'system', turn: state.turnCount },
       ...bossLog,
     ],
   };
@@ -830,9 +1031,13 @@ export function descendFloor(state: GameState): GameState {
 
 // --- Calculate final score ---
 export function calculateScore(state: GameState): number {
-  return state.score
+  const endlessBonus = state.isEndless ? (state.deepestFloor - 30) * 500 : 0;
+  return (
+    state.score
     + state.killCount * 15
     + state.player.level * 100
     + state.deepestFloor * 200
-    + (state.victory ? 10000 : 0);
+    + (state.victory ? 10000 : 0)
+    + endlessBonus
+  );
 }

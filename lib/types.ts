@@ -18,6 +18,11 @@ export enum Tile {
   Water = 4,
   Mushroom = 5, // decorative glowing mushroom
   Chest = 6,
+  Lava = 7,
+  Crystal = 8,
+  Vine = 9,
+  BoneFloor = 10,
+  AbyssFloor = 11,
 }
 
 // --- Entity Types ---
@@ -25,7 +30,7 @@ export type EntityType = 'player' | 'enemy' | 'item';
 
 // --- Status Effects ---
 export interface StatusEffect {
-  type: 'poison' | 'regen' | 'strength' | 'shield' | 'slow' | 'blind' | 'haste';
+  type: 'poison' | 'regen' | 'strength' | 'shield' | 'slow' | 'blind' | 'haste' | 'cure_poison' | 'fire_aura' | 'invulnerable';
   turnsLeft: number;
   value: number; // damage per turn, bonus amount, etc.
 }
@@ -50,7 +55,7 @@ export interface ItemDef {
   manaAmount?: number;
   statusEffect?: StatusEffect;
   // Scroll effects
-  scrollEffect?: 'reveal_map' | 'teleport' | 'fireball' | 'freeze_all' | 'summon_ally';
+  scrollEffect?: 'reveal_map' | 'teleport' | 'fireball' | 'freeze_all' | 'summon_ally' | 'piercing_strike' | 'earthquake' | 'fire_wave' | 'backstab' | 'banish';
   // Rarity affects glow color
   rarity: 'common' | 'uncommon' | 'rare' | 'legendary';
   floorMin: number; // earliest floor this can appear
@@ -153,6 +158,74 @@ export interface LogEntry {
   turn: number;
 }
 
+// --- Biome System ---
+export type BiomeType = 'shallow_caves' | 'fungal_forest' | 'crystal_caverns' | 'lava_depths' | 'the_abyss';
+
+export interface BiomeDefinition {
+  id: BiomeType;
+  name: string;
+  floorRange: [number, number]; // e.g. [1, 6]
+  description: string;
+  tileColors: {
+    wall: string;
+    floor: string;
+    floorChar: string;
+    accent: string; // for mushrooms, crystals, etc.
+    water: string;
+    fog: string;
+  };
+  ambientColor: string; // glow color
+  enemyPool: string[]; // enemy def IDs
+  decorTile: Tile; // biome-specific decoration tile
+  decorChance: number;
+}
+
+// --- Meta-progression ---
+export interface MetaProgression {
+  souls: number;
+  totalSoulsEarned: number;
+  upgrades: Record<string, number>; // upgradeId -> level
+  unlockedClasses: string[];
+  achievements: Record<string, boolean>; // achievementId -> unlocked
+  achievementProgress: Record<string, number>; // for progressive achievements
+  totalRuns: number;
+  bestScore: number;
+  bestFloor: number;
+  totalKills: number;
+}
+
+export interface MetaUpgrade {
+  id: string;
+  name: string;
+  icon: string;
+  description: string;
+  maxLevel: number;
+  baseCost: number;
+  costScaling: number; // multiplier per level
+  effect: { stat: 'maxHp' | 'atk' | 'def' | 'maxInventory' | 'viewRadius' | 'soulBonus' | 'startingItem'; value: number };
+}
+
+export interface Achievement {
+  id: string;
+  name: string;
+  icon: string;
+  description: string;
+  requirement: { type: 'kills' | 'floor' | 'score' | 'boss_kills' | 'items_used' | 'runs' | 'souls_earned' | 'class_unlock' | 'special'; value: number; enemyId?: string };
+  reward: { type: 'souls' | 'unlock_class' | 'unlock_item' | 'title'; value: number | string };
+  hidden?: boolean;
+}
+
+export interface PlayerClass {
+  id: string;
+  name: string;
+  icon: string;
+  description: string;
+  baseStats: { hp: number; mp: number; atk: number; def: number };
+  startingItem?: string;
+  passive: string; // description of passive ability
+  passiveEffect: { type: 'crit_chance' | 'heal_bonus' | 'xp_bonus' | 'vision' | 'dodge' | 'thorns'; value: number };
+}
+
 // --- Full Game State ---
 export interface GameState {
   player: PlayerState;
@@ -168,6 +241,10 @@ export interface GameState {
   killCount: number;
   deepestFloor: number;
   startTime: number;
+  biome: BiomeType;
+  classId: string;
+  soulsEarned: number; // for this run
+  isEndless: boolean;
 }
 
 // --- High Score ---
@@ -179,10 +256,11 @@ export interface HighScore {
   turns: number;
   causeOfDeath: string;
   date: number;
+  className: string;
 }
 
 // --- Direction ---
-export type Direction = 'up' | 'down' | 'left' | 'right' | 'upleft' | 'upright' | 'downleft' | 'downright' | 'wait';
+export type Direction = 'up' | 'down' | 'left' | 'right' | 'upleft' | 'upright' | 'downleft' | 'downright' | 'wait' | 'descend';
 
 export const DIR_OFFSETS: Record<Direction, Pos> = {
   up: { x: 0, y: -1 },
@@ -194,4 +272,5 @@ export const DIR_OFFSETS: Record<Direction, Pos> = {
   downleft: { x: -1, y: 1 },
   downright: { x: 1, y: 1 },
   wait: { x: 0, y: 0 },
+  descend: { x: 0, y: 0 },
 };

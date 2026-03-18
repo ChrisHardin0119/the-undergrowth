@@ -3,6 +3,7 @@
 // ============================================
 
 import { Tile, DungeonFloor, Room, Pos } from './types';
+import { getBiomeForFloor } from './biomes';
 
 // --- Seeded RNG (simple LCG) ---
 let seed = Date.now();
@@ -20,12 +21,19 @@ function pick<T>(arr: T[]): T {
 
 // --- Generate a dungeon floor ---
 export function generateFloor(floorNumber: number): DungeonFloor {
-  // Floors get larger as you go deeper
-  const width = Math.min(50, 35 + Math.floor(floorNumber * 1.5));
-  const height = Math.min(35, 25 + Math.floor(floorNumber));
-  const numRooms = Math.min(12, 5 + Math.floor(floorNumber * 0.7));
+  // Get the biome for this floor
+  const biome = getBiomeForFloor(floorNumber);
+
+  // For endless mode (floor > 30), keep using the actual floor number for scaling,
+  // but biome cycles automatically via getBiomeForFloor
+  const scalingFloor = floorNumber;
+
+  // Aggressively scale map size to handle 30+ floors
+  const width = Math.min(60, 35 + Math.floor(scalingFloor * 1.2));
+  const height = Math.min(45, 25 + Math.floor(scalingFloor * 0.8));
+  const numRooms = Math.min(15, 5 + Math.floor(scalingFloor * 0.5));
   const minRoomSize = 4;
-  const maxRoomSize = Math.min(10, 6 + Math.floor(floorNumber * 0.3));
+  const maxRoomSize = Math.min(10, 6 + Math.floor(scalingFloor * 0.3));
 
   // Initialize all walls
   const tiles: Tile[][] = [];
@@ -94,31 +102,26 @@ export function generateFloor(floorNumber: number): DungeonFloor {
     }
   }
 
-  // Add decorative mushrooms on floors
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (tiles[y][x] === Tile.Floor && rng() < 0.04) {
-        tiles[y][x] = Tile.Mushroom;
-      }
-    }
-  }
-
-  // Add water pools in some rooms
-  if (rooms.length > 3 && rng() < 0.5) {
-    const waterRoom = rooms[rngInt(1, rooms.length - 2)];
-    const poolCX = waterRoom.centerX;
-    const poolCY = waterRoom.centerY;
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        const wx = poolCX + dx;
-        const wy = poolCY + dy;
-        if (wy > 0 && wy < height - 1 && wx > 0 && wx < width - 1) {
-          if (tiles[wy][wx] === Tile.Floor && rng() < 0.7) {
-            tiles[wy][wx] = Tile.Water;
-          }
-        }
-      }
-    }
+  // Add biome-specific decorations and features
+  if (biome.id === 'shallow_caves') {
+    // Shallow Caves: Mushroom decorations and water pools
+    addDecorations(tiles, width, height, biome.decorTile, biome.decorChance);
+    addWaterPools(tiles, width, height, rooms);
+  } else if (biome.id === 'fungal_forest') {
+    // Fungal Forest: Vine decorations, more organic rooms
+    addDecorations(tiles, width, height, biome.decorTile, biome.decorChance);
+    addWaterPools(tiles, width, height, rooms, 0.4);
+  } else if (biome.id === 'crystal_caverns') {
+    // Crystal Caverns: Crystal decorations, larger rooms already generated
+    addDecorations(tiles, width, height, biome.decorTile, biome.decorChance);
+    // Larger rooms already happen naturally due to increased maxRoomSize from scaling
+  } else if (biome.id === 'lava_depths') {
+    // Lava Depths: Lava pools instead of water, scatter lava along corridors
+    addLavaPools(tiles, width, height, rooms);
+    addLavaCorridorScatter(tiles, width, height);
+  } else if (biome.id === 'the_abyss') {
+    // The Abyss: BoneFloor and AbyssFloor scattered among floor tiles
+    addAbyssFloorVariants(tiles, width, height);
   }
 
   // Place stairs down in the last room
@@ -134,6 +137,84 @@ export function generateFloor(floorNumber: number): DungeonFloor {
   }
 
   return { width, height, tiles, rooms, explored, visible };
+}
+
+// --- Add decorative tiles to floor tiles ---
+function addDecorations(tiles: Tile[][], width: number, height: number, decorTile: Tile, decorChance: number) {
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (tiles[y][x] === Tile.Floor && rng() < decorChance) {
+        tiles[y][x] = decorTile;
+      }
+    }
+  }
+}
+
+// --- Add water pools in some rooms ---
+function addWaterPools(tiles: Tile[][], width: number, height: number, rooms: Room[], frequency: number = 0.5) {
+  if (rooms.length > 3 && rng() < frequency) {
+    const waterRoom = rooms[rngInt(1, rooms.length - 2)];
+    const poolCX = waterRoom.centerX;
+    const poolCY = waterRoom.centerY;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const wx = poolCX + dx;
+        const wy = poolCY + dy;
+        if (wy > 0 && wy < height - 1 && wx > 0 && wx < width - 1) {
+          if (tiles[wy][wx] === Tile.Floor && rng() < 0.7) {
+            tiles[wy][wx] = Tile.Water;
+          }
+        }
+      }
+    }
+  }
+}
+
+// --- Add lava pools in rooms (Lava Depths) ---
+function addLavaPools(tiles: Tile[][], width: number, height: number, rooms: Room[]) {
+  if (rooms.length > 3 && rng() < 0.6) {
+    const lavaRoom = rooms[rngInt(1, rooms.length - 2)];
+    const poolCX = lavaRoom.centerX;
+    const poolCY = lavaRoom.centerY;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const lx = poolCX + dx;
+        const ly = poolCY + dy;
+        if (ly > 0 && ly < height - 1 && lx > 0 && lx < width - 1) {
+          if (tiles[ly][lx] === Tile.Floor && rng() < 0.7) {
+            tiles[ly][lx] = Tile.Lava;
+          }
+        }
+      }
+    }
+  }
+}
+
+// --- Scatter lava along corridors (Lava Depths) ---
+function addLavaCorridorScatter(tiles: Tile[][], width: number, height: number) {
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (tiles[y][x] === Tile.Floor && rng() < 0.02) {
+        tiles[y][x] = Tile.Lava;
+      }
+    }
+  }
+}
+
+// --- Add BoneFloor and AbyssFloor variants (The Abyss) ---
+function addAbyssFloorVariants(tiles: Tile[][], width: number, height: number) {
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (tiles[y][x] === Tile.Floor) {
+        const roll = rng();
+        if (roll < 0.12) {
+          tiles[y][x] = Tile.BoneFloor;
+        } else if (roll < 0.24) {
+          tiles[y][x] = Tile.AbyssFloor;
+        }
+      }
+    }
+  }
 }
 
 // --- Carve an L-shaped corridor ---
@@ -203,7 +284,19 @@ export function findRandomWalkable(floor: DungeonFloor, occupied: Pos[]): Pos | 
 
 // --- Check if a tile is walkable ---
 export function isWalkable(tile: Tile): boolean {
-  return tile === Tile.Floor || tile === Tile.StairsDown || tile === Tile.Mushroom || tile === Tile.Door;
+  // Floor variants: Mushroom, Crystal, Vine, BoneFloor, AbyssFloor are all walkable
+  // StairsDown and Door are walkable
+  // Water and Lava are NOT walkable (water damages/blocks, lava is impassable)
+  return (
+    tile === Tile.Floor ||
+    tile === Tile.StairsDown ||
+    tile === Tile.Door ||
+    tile === Tile.Mushroom ||
+    tile === Tile.Crystal ||
+    tile === Tile.Vine ||
+    tile === Tile.BoneFloor ||
+    tile === Tile.AbyssFloor
+  );
 }
 
 // --- Check if a position is in bounds ---
