@@ -5,7 +5,7 @@ import { GameState, Tile, Direction, MetaProgression, BiomeType, Achievement } f
 import { createNewGame, processAction, useItem, dropItem, getEffectiveStats, calculateScore } from '@/lib/gameEngine';
 import { getEnemyDef, getItemDef } from '@/lib/entities';
 import { getBiomeForFloor, getBiomeCSS } from '@/lib/biomes';
-import { loadMeta, saveMeta, checkAchievements, calculateSoulsEarned, META_UPGRADES, PLAYER_CLASSES, ACHIEVEMENTS } from '@/lib/meta';
+import { loadMeta, saveMeta, checkAchievements, calculateSoulsEarned, META_UPGRADES, PLAYER_CLASSES, ACHIEVEMENTS, getUpgradeCost, unlockClass } from '@/lib/meta';
 import { initAudio, sfxStep, sfxHit, sfxPlayerHurt, sfxPickup, sfxLevelUp, sfxDeath, sfxDescend, sfxBoss, sfxVictory, sfxUseItem, startAmbient, stopAmbient } from '@/lib/audio';
 
 type ScreenType = 'menu' | 'class_select' | 'game' | 'inventory' | 'soul_shop' | 'achievements' | 'help' | 'gameover';
@@ -82,8 +82,6 @@ export default function GamePage() {
 
   // Keyboard handler
   useEffect(() => {
-    if (!soundEnabled) return;
-
     const handleKeyDown = (e: KeyboardEvent) => {
       const key = e.key.toLowerCase();
 
@@ -196,16 +194,15 @@ export default function GamePage() {
           }
         }
 
-        if (newState.gameOver || newState.victory) {
+        if (newState.gameOver) {
           if (soundEnabled) {
-            if (newState.victory) {
-              sfxVictory();
-            } else {
-              sfxDeath();
-            }
+            sfxDeath();
             stopAmbient();
           }
           handleGameEnd(newState);
+        } else if (newState.victory && !gameState.victory) {
+          // First time achieving victory — play fanfare but don't end
+          if (soundEnabled) sfxVictory();
         }
       }
     };
@@ -247,6 +244,26 @@ export default function GamePage() {
 
     setScreen('gameover');
   };
+
+  const handleMobileInput = useCallback((dir: Direction) => {
+    if (!gameState || screen !== 'game') return;
+    const newState = processAction(gameState, dir);
+    setGameState(newState);
+
+    if (soundEnabled) {
+      if (newState.player.hp < gameState.player.hp) sfxPlayerHurt();
+      if (newState.player.inventory.length > gameState.player.inventory.length) sfxPickup();
+      if (newState.player.level > gameState.player.level) sfxLevelUp();
+      if ((newState.player.pos.x !== gameState.player.pos.x || newState.player.pos.y !== gameState.player.pos.y) && dir !== 'wait') sfxStep();
+    }
+
+    if (newState.gameOver) {
+      if (soundEnabled) { sfxDeath(); stopAmbient(); }
+      handleGameEnd(newState);
+    } else if (newState.victory && !gameState.victory) {
+      if (soundEnabled) sfxVictory();
+    }
+  }, [gameState, screen, soundEnabled]);
 
   const startNewGame = (classId: string) => {
     if (soundEnabled) startAmbient();
@@ -493,7 +510,7 @@ export default function GamePage() {
         </div>
 
         <div className="game-main">
-          <div className="viewport">{tileGrid}</div>
+          <div className="viewport" style={{ gridTemplateColumns: `repeat(${VIEWPORT_W}, 1fr)` }}>{tileGrid}</div>
 
           <div className="game-sidebar">
             {onStairs && <div className="stairs-prompt">Press ENTER to descend</div>}
@@ -537,7 +554,61 @@ export default function GamePage() {
           </button>
         </div>
 
-        {showMinimap && <div className="minimap-overlay">Minimap (press M to hide)</div>}
+        {showMinimap && (
+          <div className="minimap-overlay" onClick={() => setShowMinimap(false)}>
+            <div className="minimap-content">
+              <div className="minimap-title">Map (tap or press M to close)</div>
+              <div className="minimap-grid" style={{
+                display: 'grid',
+                gridTemplateColumns: `repeat(${floor.width}, 3px)`,
+                gap: 0,
+              }}>
+                {Array.from({ length: floor.height }).map((_, my) =>
+                  Array.from({ length: floor.width }).map((_, mx) => {
+                    const explored = floor.explored[my]?.[mx];
+                    const isP = mx === player.pos.x && my === player.pos.y;
+                    const isEnemy = explored && enemies.some(e => e.pos.x === mx && e.pos.y === my && e.hp > 0 && floor.visible[my]?.[mx]);
+                    const isStairs = explored && floor.tiles[my][mx] === Tile.StairsDown;
+                    const isItem = explored && items.some(i => i.pos && i.pos.x === mx && i.pos.y === my) && floor.visible[my]?.[mx];
+                    const tile = floor.tiles[my][mx];
+                    let color = 'transparent';
+                    if (isP) color = '#00ff88';
+                    else if (isEnemy) color = '#ff4444';
+                    else if (isStairs) color = '#ffff00';
+                    else if (isItem) color = '#44aaff';
+                    else if (explored && tile === Tile.Wall) color = '#333';
+                    else if (explored && tile !== Tile.Wall) color = '#666';
+                    return <div key={`${mx}-${my}`} style={{ width: 3, height: 3, backgroundColor: color }} />;
+                  })
+                )}
+              </div>
+              <div className="minimap-legend">
+                <span style={{ color: '#00ff88' }}>● You</span>
+                <span style={{ color: '#ff4444' }}>● Enemy</span>
+                <span style={{ color: '#ffff00' }}>● Stairs</span>
+                <span style={{ color: '#44aaff' }}>● Item</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Mobile touch controls */}
+        <div className="mobile-controls">
+          <div className="dpad">
+            <button className="dpad-btn dpad-up" onClick={() => handleMobileInput('up')}>▲</button>
+            <button className="dpad-btn dpad-left" onClick={() => handleMobileInput('left')}>◄</button>
+            <button className="dpad-btn dpad-center" onClick={() => handleMobileInput('wait')}>●</button>
+            <button className="dpad-btn dpad-right" onClick={() => handleMobileInput('right')}>►</button>
+            <button className="dpad-btn dpad-down" onClick={() => handleMobileInput('down')}>▼</button>
+          </div>
+          <div className="mobile-actions">
+            {onStairs && (
+              <button className="mobile-action-btn stairs-btn" onClick={() => handleMobileInput('descend')}>
+                DESCEND
+              </button>
+            )}
+          </div>
+        </div>
       </div>
     );
   };
@@ -669,7 +740,7 @@ export default function GamePage() {
               {META_UPGRADES.map(upgrade => {
                 const currentLevel = meta?.upgrades[upgrade.id] || 0;
                 const isMaxed = currentLevel >= upgrade.maxLevel;
-                const cost = isMaxed ? 0 : 50 + currentLevel * 25; // placeholder cost calc
+                const cost = isMaxed ? 0 : getUpgradeCost(upgrade, currentLevel);
                 const canAfford = !isMaxed && (meta?.souls || 0) >= cost;
 
                 return (
@@ -708,28 +779,30 @@ export default function GamePage() {
           <div className="shop-section">
             <h2>Classes</h2>
             <div className="classes-grid">
-              {PLAYER_CLASSES.map(cls => {
+              {PLAYER_CLASSES.filter(cls => cls.id !== 'explorer').map(cls => {
                 const isUnlocked = meta?.unlockedClasses.includes(cls.id);
-                const cost = cls.baseStats.hp * 100; // placeholder
+                const classCosts: Record<string, number> = { warrior: 100, shadow: 200, mycologist: 300, warden: 500 };
+                const cost = classCosts[cls.id] ?? 500;
 
                 return (
                   <div key={cls.id} className="class-shop-card">
                     <div className="class-icon">{cls.icon}</div>
                     <div className="class-name">{cls.name}</div>
+                    <div className="class-desc">{cls.passive}</div>
                     <button
                       className={`btn btn-small ${isUnlocked ? 'btn-disabled' : ''}`}
                       disabled={isUnlocked || (meta?.souls || 0) < cost}
                       onClick={() => {
-                        if (meta && !isUnlocked && meta.souls >= cost) {
-                          const updatedMeta = { ...meta };
-                          updatedMeta.unlockedClasses.push(cls.id);
-                          updatedMeta.souls -= cost;
-                          saveMeta(updatedMeta);
-                          setMeta(updatedMeta);
+                        if (meta && !isUnlocked) {
+                          const result = unlockClass(meta, cls.id);
+                          if (result) {
+                            saveMeta(result);
+                            setMeta(result);
+                          }
                         }
                       }}
                     >
-                      {isUnlocked ? 'UNLOCKED' : `UNLOCK (${cost})`}
+                      {isUnlocked ? 'UNLOCKED' : `UNLOCK (${cost} souls)`}
                     </button>
                   </div>
                 );

@@ -212,10 +212,10 @@ function spawnItems(floor: ReturnType<typeof generateFloor>, floorNum: number, o
   }
 
   // Always place at least one healing item on floor 1
-  if (floorNum === 1 && !items.some(i => i.defId === 'health_moss')) {
+  if (floorNum === 1 && !items.some(i => i.defId === 'healing_moss')) {
     const room = floor.rooms[rngInt(0, Math.min(2, floor.rooms.length - 1))];
     const pos = findSpawnPos(floor, room, [...occupied, ...items.filter(it => it.pos).map(it => it.pos!)]);
-    if (pos) items.push({ defId: 'health_moss', pos });
+    if (pos) items.push({ defId: 'healing_moss', pos });
   }
 
   return items;
@@ -313,10 +313,13 @@ export function processAction(state: GameState, direction: Direction): GameState
         // Check if same defId exists in inventory (stacking)
         const existingIdx = newPlayer.inventory.findIndex(invItem => invItem.defId === item.defId);
         if (existingIdx >= 0) {
-          // Stack: just remove from ground, inventory stays as-is (UI groups by defId)
+          // Stack: add another copy to inventory (UI groups by defId and shows count)
+          newState.player = {
+            ...newPlayer,
+            inventory: [...newPlayer.inventory, { defId: item.defId }],
+          };
           newState.items = state.items.filter((_, idx) => idx !== itemIdx);
           log.push({ text: `Picked up ${def.icon} ${def.name}`, type: 'pickup', turn });
-          newState.player = newPlayer;
         } else if (newPlayer.inventory.length < newPlayer.maxInventory) {
           // Add new stack
           newState.player = {
@@ -499,7 +502,7 @@ function grantXP(player: PlayerState, xp: number, log: LogEntry[], turn: number)
 
 // --- Finalize turn: enemy AI + status effects ---
 function finalizeTurn(state: GameState, log: LogEntry[]): GameState {
-  if (state.gameOver || state.victory) return state;
+  if (state.gameOver) return state;
 
   let newState = { ...state };
   const turn = state.turnCount;
@@ -551,8 +554,9 @@ function processEnemyTurns(state: GameState, log: LogEntry[], turn: number): Gam
       enemy.lastSeenPlayer = { ...playerPos };
     }
 
-    // Boss abilities
-    if (def.behavior === 'boss' && def.abilities && canSeePlayer) {
+    // Enemy abilities (bosses and any enemy with abilities array)
+    if (def.abilities && def.abilities.length > 0 && canSeePlayer) {
+      let usedAbility = false;
       for (const ability of def.abilities) {
         const cd = enemy.abilityCooldowns[ability.name] || 0;
         if (cd <= 0 && dist <= (ability.range || 1)) {
@@ -560,9 +564,13 @@ function processEnemyTurns(state: GameState, log: LogEntry[], turn: number): Gam
           const result = useEnemyAbility(newState, enemy, ability, log, turn);
           newState = result.state;
           enemy.abilityCooldowns[ability.name] = ability.cooldown;
-          newEnemies[i] = enemy;
-          continue;
+          usedAbility = true;
+          break; // Only use one ability per turn
         }
+      }
+      if (usedAbility) {
+        newEnemies[i] = enemy;
+        continue;
       }
     }
 
@@ -574,31 +582,37 @@ function processEnemyTurns(state: GameState, log: LogEntry[], turn: number): Gam
     // Movement / attack AI
     if (dist === 1 && canSeePlayer) {
       // Adjacent to player — attack!
-      const playerStats = getEffectiveStats(newState.player);
-      let rawDmg = Math.max(1, enemy.atk - playerStats.def + rngInt(-1, 1));
+      // Check invulnerability
+      const isInvuln = newState.player.statusEffects.some(e => e.type === 'invulnerable');
+      if (isInvuln) {
+        log.push({ text: `${def.icon} ${def.name} attacks but you are invulnerable!`, type: 'combat', turn });
+      } else {
+        const playerStats = getEffectiveStats(newState.player);
+        let rawDmg = Math.max(1, enemy.atk - playerStats.def + rngInt(-1, 1));
 
-      // Apply player dodge from class passive
-      if (playerClass && playerClass.passiveEffect.type === 'dodge') {
-        if (rng() < (playerClass.passiveEffect.value / 100)) {
-          rawDmg = 0;
-          log.push({ text: `${def.icon} ${def.name} attacks but you dodge!`, type: 'combat', turn });
+        // Apply player dodge from class passive
+        if (playerClass && playerClass.passiveEffect.type === 'dodge') {
+          if (rng() < (playerClass.passiveEffect.value / 100)) {
+            rawDmg = 0;
+            log.push({ text: `${def.icon} ${def.name} attacks but you dodge!`, type: 'combat', turn });
+          }
         }
-      }
 
-      // Apply thorns reflection from class passive
-      if (playerClass && playerClass.passiveEffect.type === 'thorns' && rawDmg > 0) {
-        const thornDmg = playerClass.passiveEffect.value;
-        enemy.hp -= thornDmg;
-        log.push({ text: `${def.icon} ${def.name} is hurt by your thorns! (${thornDmg} dmg)`, type: 'combat', turn });
-      }
+        // Apply thorns reflection from class passive
+        if (playerClass && playerClass.passiveEffect.type === 'thorns' && rawDmg > 0) {
+          const thornDmg = playerClass.passiveEffect.value;
+          enemy.hp -= thornDmg;
+          log.push({ text: `${def.icon} ${def.name} is hurt by your thorns! (${thornDmg} dmg)`, type: 'combat', turn });
+        }
 
-      newState.player = { ...newState.player, hp: newState.player.hp - rawDmg };
-      if (rawDmg > 0) {
-        log.push({
-          text: `${def.icon} ${def.name} hits you for ${rawDmg} damage!`,
-          type: 'combat',
-          turn,
-        });
+        newState.player = { ...newState.player, hp: newState.player.hp - rawDmg };
+        if (rawDmg > 0) {
+          log.push({
+            text: `${def.icon} ${def.name} hits you for ${rawDmg} damage!`,
+            type: 'combat',
+            turn,
+          });
+        }
       }
     } else if (canSeePlayer && (def.behavior === 'chase' || def.behavior === 'boss')) {
       // Move toward player
@@ -739,6 +753,12 @@ function useEnemyAbility(
         enemy.pos = pos;
         log.push({ text: `${eName} vanishes and reappears elsewhere!`, type: 'combat', turn });
       }
+      return { state };
+    }
+    case 'buff': {
+      // Enemy buffs itself (increases atk)
+      enemy.atk += ability.value;
+      log.push({ text: `${eName} powers up! (+${ability.value} ATK)`, type: 'boss', turn });
       return { state };
     }
     default:
@@ -901,6 +921,181 @@ export function useItem(state: GameState, inventoryIdx: number): GameState {
             statusEffects: [...e.statusEffects, { type: 'slow' as const, turnsLeft: 3, value: 0 }],
           }));
           log.push({ text: `Used ${def.icon} ${def.name}. All enemies frozen!`, type: 'pickup', turn });
+          break;
+        }
+        case 'piercing_strike': {
+          // Shoot in 4 cardinal directions, hitting first enemy in each line
+          const dirs = [{ dx: 1, dy: 0 }, { dx: -1, dy: 0 }, { dx: 0, dy: 1 }, { dx: 0, dy: -1 }];
+          let hitCount = 0;
+          const updatedEnemies = [...newState.enemies];
+          for (const dir of dirs) {
+            for (let dist = 1; dist <= 6; dist++) {
+              const tx = player.pos.x + dir.dx * dist;
+              const ty = player.pos.y + dir.dy * dist;
+              if (!inBounds(tx, ty, newState.floor) || newState.floor.tiles[ty][tx] === Tile.Wall) break;
+              const eIdx = updatedEnemies.findIndex(e => e.pos.x === tx && e.pos.y === ty && e.hp > 0);
+              if (eIdx >= 0) {
+                const dmg = 20 + rngInt(0, 10);
+                updatedEnemies[eIdx] = { ...updatedEnemies[eIdx], hp: updatedEnemies[eIdx].hp - dmg };
+                const eDef = getEnemyDef(updatedEnemies[eIdx].defId);
+                log.push({ text: `💎 Crystal shard pierces ${eDef?.name || 'enemy'} for ${dmg}!`, type: 'combat', turn });
+                hitCount++;
+                if (updatedEnemies[eIdx].hp <= 0) {
+                  log.push({ text: `${eDef?.icon} ${eDef?.name} shattered!`, type: 'combat', turn });
+                  newState.killCount++;
+                  newState.score += (eDef?.xpReward || 10) * 10;
+                  player = grantXP(player, eDef?.xpReward || 10, log, turn);
+                }
+                break; // Only hit first enemy per direction
+              }
+            }
+          }
+          if (hitCount === 0) {
+            log.push({ text: `Used ${def.icon} ${def.name}. Crystal shards fly but hit nothing.`, type: 'pickup', turn });
+          }
+          newState.enemies = updatedEnemies.filter(e => e.hp > 0);
+          break;
+        }
+        case 'earthquake': {
+          // Damage AND stun all enemies on the floor
+          let totalHits = 0;
+          const eqEnemies = newState.enemies.map(e => {
+            if (e.hp <= 0) return e;
+            const dmg = 10 + rngInt(0, 8);
+            const eDef = getEnemyDef(e.defId);
+            log.push({ text: `🌍 Earthquake hits ${eDef?.name || 'enemy'} for ${dmg}!`, type: 'combat', turn });
+            totalHits++;
+            const newHp = e.hp - dmg;
+            if (newHp <= 0) {
+              log.push({ text: `${eDef?.icon} ${eDef?.name} crushed!`, type: 'combat', turn });
+              newState.killCount++;
+              newState.score += (eDef?.xpReward || 10) * 10;
+              player = grantXP(player, eDef?.xpReward || 10, log, turn);
+            }
+            return { ...e, hp: newHp, stunned: true };
+          });
+          newState.enemies = eqEnemies.filter(e => e.hp > 0);
+          if (totalHits === 0) {
+            log.push({ text: `Used ${def.icon} ${def.name}. The ground shakes but no enemies are nearby.`, type: 'pickup', turn });
+          }
+          break;
+        }
+        case 'fire_wave': {
+          // Cone of fire in the direction the player last moved (or forward)
+          // Damages all enemies within 3 tiles
+          const fwEnemies = newState.enemies.map(e => {
+            if (e.hp <= 0) return e;
+            const dist = distance(player.pos.x, player.pos.y, e.pos.x, e.pos.y);
+            if (dist <= 3) {
+              const dmg = 12 + rngInt(0, 8);
+              const eDef = getEnemyDef(e.defId);
+              log.push({ text: `🔥 Fire wave burns ${eDef?.name || 'enemy'} for ${dmg}!`, type: 'combat', turn });
+              const newHp = e.hp - dmg;
+              if (newHp <= 0) {
+                log.push({ text: `${eDef?.icon} ${eDef?.name} incinerated!`, type: 'combat', turn });
+                newState.killCount++;
+                newState.score += (eDef?.xpReward || 10) * 10;
+                player = grantXP(player, eDef?.xpReward || 10, log, turn);
+              }
+              return { ...e, hp: newHp };
+            }
+            return e;
+          });
+          newState.enemies = fwEnemies.filter(e => e.hp > 0);
+          log.push({ text: `Used ${def.icon} ${def.name}. Flames surge outward!`, type: 'pickup', turn });
+          break;
+        }
+        case 'backstab': {
+          // Find nearest visible enemy and teleport behind it, dealing massive damage
+          let nearestEnemy: EnemyInstance | null = null;
+          let nearestDist = Infinity;
+          for (const e of newState.enemies) {
+            if (e.hp <= 0) continue;
+            const d = distance(player.pos.x, player.pos.y, e.pos.x, e.pos.y);
+            if (d < nearestDist && d <= 8) {
+              nearestDist = d;
+              nearestEnemy = e;
+            }
+          }
+          if (nearestEnemy) {
+            // Teleport adjacent to enemy
+            const adj = [
+              { x: nearestEnemy.pos.x + 1, y: nearestEnemy.pos.y },
+              { x: nearestEnemy.pos.x - 1, y: nearestEnemy.pos.y },
+              { x: nearestEnemy.pos.x, y: nearestEnemy.pos.y + 1 },
+              { x: nearestEnemy.pos.x, y: nearestEnemy.pos.y - 1 },
+            ];
+            let telePos: Pos | null = null;
+            for (const p of adj) {
+              if (inBounds(p.x, p.y, newState.floor) && isWalkable(newState.floor.tiles[p.y][p.x])) {
+                if (!newState.enemies.some(e => e.pos.x === p.x && e.pos.y === p.y && e.hp > 0)) {
+                  telePos = p;
+                  break;
+                }
+              }
+            }
+            if (telePos) {
+              player.pos = telePos;
+              computeFOV(newState.floor, telePos.x, telePos.y);
+            }
+            // Deal massive backstab damage
+            const dmg = 30 + rngInt(0, 15);
+            const eDef = getEnemyDef(nearestEnemy.defId);
+            log.push({ text: `🗡️ Backstab! You strike ${eDef?.name || 'enemy'} for ${dmg} damage!`, type: 'combat', turn });
+            nearestEnemy.hp -= dmg;
+            if (nearestEnemy.hp <= 0) {
+              log.push({ text: `${eDef?.icon} ${eDef?.name} assassinated!`, type: 'combat', turn });
+              newState.killCount++;
+              newState.score += (eDef?.xpReward || 10) * 10;
+              player = grantXP(player, eDef?.xpReward || 10, log, turn);
+              newState.enemies = newState.enemies.filter(e => e !== nearestEnemy);
+            }
+          } else {
+            log.push({ text: `Used ${def.icon} ${def.name} but no enemies are nearby.`, type: 'info', turn });
+          }
+          break;
+        }
+        case 'banish': {
+          // Instantly destroy all non-boss enemies on the floor
+          const banished: string[] = [];
+          newState.enemies = newState.enemies.filter(e => {
+            if (e.hp <= 0) return false;
+            const eDef = getEnemyDef(e.defId);
+            if (eDef?.isBoss) return true; // Bosses resist banishment
+            banished.push(eDef?.name || 'enemy');
+            newState.killCount++;
+            newState.score += (eDef?.xpReward || 10) * 5; // half score since it's easy
+            player = grantXP(player, Math.floor((eDef?.xpReward || 10) / 2), log, turn);
+            return false;
+          });
+          if (banished.length > 0) {
+            log.push({ text: `⚫ ${banished.length} enemies banished to the void!`, type: 'combat', turn });
+          } else {
+            log.push({ text: `Used ${def.icon} ${def.name} but there was nothing to banish.`, type: 'info', turn });
+          }
+          break;
+        }
+        case 'summon_ally': {
+          // Summon a friendly spore creature that fights enemies (simplified: just damage nearest enemies)
+          log.push({ text: `🧬 A powerful spore creature materializes!`, type: 'pickup', turn });
+          // Deal damage to up to 3 nearest enemies
+          const sorted = [...newState.enemies]
+            .filter(e => e.hp > 0)
+            .sort((a, b) => distance(player.pos.x, player.pos.y, a.pos.x, a.pos.y) - distance(player.pos.x, player.pos.y, b.pos.x, b.pos.y))
+            .slice(0, 3);
+          for (const target of sorted) {
+            const dmg = 15 + rngInt(0, 10);
+            target.hp -= dmg;
+            const eDef = getEnemyDef(target.defId);
+            log.push({ text: `🧬 Spore ally attacks ${eDef?.name || 'enemy'} for ${dmg}!`, type: 'combat', turn });
+            if (target.hp <= 0) {
+              log.push({ text: `${eDef?.icon} ${eDef?.name} destroyed by your ally!`, type: 'combat', turn });
+              newState.killCount++;
+              newState.score += (eDef?.xpReward || 10) * 10;
+              player = grantXP(player, eDef?.xpReward || 10, log, turn);
+            }
+          }
+          newState.enemies = newState.enemies.filter(e => e.hp > 0);
           break;
         }
       }

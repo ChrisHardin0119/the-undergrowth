@@ -1264,7 +1264,21 @@ export function getEnemiesForFloor(floor: number): EnemyDef[] {
 
 // Get boss for a given floor (if any)
 export function getBossForFloor(floor: number): EnemyDef | undefined {
-  return ENEMIES.find(e => e.isBoss && e.floorMin === floor);
+  // Direct match for floors 1-30
+  const direct = ENEMIES.find(e => e.isBoss && e.floorMin === floor);
+  if (direct) return direct;
+
+  // Endless mode: cycle bosses every 6 floors after floor 30
+  if (floor > 30 && floor % 6 === 0) {
+    const effectiveFloor = ((floor - 1) % 30) + 1;
+    // Find the boss closest to this effective floor
+    const bosses = ENEMIES.filter(e => e.isBoss).sort((a, b) =>
+      Math.abs(a.floorMin - effectiveFloor) - Math.abs(b.floorMin - effectiveFloor)
+    );
+    return bosses[0];
+  }
+
+  return undefined;
 }
 
 // Get items that can appear on a given floor
