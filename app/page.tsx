@@ -213,7 +213,24 @@ export default function GamePage() {
 
   const handleGameEnd = (finalState: GameState) => {
     const souls = calculateSoulsEarned(finalState);
-    const { meta: updatedMeta, newAchievements } = checkAchievements(meta || loadMeta(), finalState);
+    const currentMeta = meta || loadMeta();
+
+    // Track boss kills in achievement progress (check game log for boss defeats)
+    const bossIds = ['boss_brood_mother', 'boss_mother_spore', 'boss_crystal_king', 'boss_infernal', 'boss_abyssal_maw'];
+    const updatedProgress = { ...currentMeta.achievementProgress };
+    for (const entry of finalState.gameLog) {
+      if (entry.type === 'boss' && entry.text.includes('BOSS DEFEATED')) {
+        for (const bossId of bossIds) {
+          const bossDef = getEnemyDef(bossId);
+          if (bossDef && entry.text.includes(bossDef.bossTitle || '')) {
+            updatedProgress[`boss_kills_${bossId}`] = (updatedProgress[`boss_kills_${bossId}`] || 0) + 1;
+          }
+        }
+      }
+    }
+    currentMeta.achievementProgress = updatedProgress;
+
+    const { meta: updatedMeta, newAchievements } = checkAchievements(currentMeta, finalState);
 
     updatedMeta.totalRuns++;
     updatedMeta.totalKills += finalState.killCount;

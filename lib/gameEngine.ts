@@ -19,6 +19,12 @@ function xpForLevel(level: number): number {
   return Math.floor(20 * Math.pow(level, 1.8));
 }
 
+// --- Get view radius (base 7 + eagle eyes meta upgrade) ---
+function getViewRadius(): number {
+  const meta = loadMeta();
+  return 7 + (meta.upgrades['eagle_eyes'] || 0);
+}
+
 // --- Boss floors: 6, 12, 18, 24, 30 (and repeats every 6 in endless) ---
 function isBossFloor(floorNum: number): boolean {
   if (floorNum <= 30) {
@@ -85,8 +91,10 @@ export function createNewGame(classId: string = 'explorer'): GameState {
     inventory: startingItems,
   };
 
-  // Compute initial FOV
-  computeFOV(floor, playerPos.x, playerPos.y);
+  // Compute initial FOV (apply Eagle Eyes bonus)
+  const eagleEyesLevel = meta.upgrades['eagle_eyes'] || 0;
+  const viewRadius = 7 + eagleEyesLevel;
+  computeFOV(floor, playerPos.x, playerPos.y, viewRadius);
 
   // Place enemies and items
   const enemies = spawnEnemies(floor, 1, [playerPos]);
@@ -191,13 +199,15 @@ function spawnItems(floor: ReturnType<typeof generateFloor>, floorNum: number, o
     const pos = findSpawnPos(floor, room, [...occupied, ...items.filter(it => it.pos).map(it => it.pos!)]);
     if (!pos) continue;
 
-    // Weight by rarity
+    // Weight by rarity (Lucky Find meta upgrade boosts rarer items)
+    const luckyFindLevel = loadMeta().upgrades['lucky_find'] || 0;
+    const luckBonus = 1 + luckyFindLevel * 0.2; // 20% better rarity per level
     const weights = available.map(it => {
       switch (it.rarity) {
         case 'common': return 10;
-        case 'uncommon': return 5;
-        case 'rare': return 2;
-        case 'legendary': return 0.5;
+        case 'uncommon': return 5 * luckBonus;
+        case 'rare': return 2 * luckBonus * luckBonus;
+        case 'legendary': return 0.5 * luckBonus * luckBonus * luckBonus;
       }
     });
     const totalWeight = weights.reduce((a, b) => a + b, 0);
@@ -350,7 +360,7 @@ export function processAction(state: GameState, direction: Direction): GameState
   }
 
   // Recompute FOV
-  computeFOV(newState.floor, newX, newY);
+  computeFOV(newState.floor, newX, newY, getViewRadius());
 
   return finalizeTurn({
     ...newState,
@@ -471,7 +481,12 @@ function processCombat(state: GameState, enemyIdx: number, turn: number, log: Lo
 
 // --- Grant XP and handle level ups ---
 function grantXP(player: PlayerState, xp: number, log: LogEntry[], turn: number): PlayerState {
-  let p = { ...player, xp: player.xp + xp };
+  // Apply Quick Learner meta bonus
+  const meta = loadMeta();
+  const quickLearnerLevel = meta.upgrades['quick_learner'] || 0;
+  const xpMultiplier = 1 + (quickLearnerLevel * 0.10); // 10% per level
+  const actualXp = Math.floor(xp * xpMultiplier);
+  let p = { ...player, xp: player.xp + actualXp };
 
   while (p.xp >= p.xpToNext) {
     p.xp -= p.xpToNext;
@@ -516,8 +531,17 @@ function finalizeTurn(state: GameState, log: LogEntry[]): GameState {
 
   // Check player death
   if (newState.player.hp <= 0) {
-    newState.gameOver = true;
-    newLog.push({ text: '💀 You have perished in the Undergrowth...', type: 'death', turn });
+    // Second Wind: chance to survive killing blow
+    const meta = loadMeta();
+    const secondWindLevel = meta.upgrades['second_wind'] || 0;
+    const surviveChance = secondWindLevel * 0.10; // 10% per level, max 30%
+    if (secondWindLevel > 0 && rng() < surviveChance) {
+      newState.player = { ...newState.player, hp: Math.floor(newState.player.maxHp * 0.25) };
+      newLog.push({ text: '💨 Second Wind! You narrowly escape death!', type: 'levelup', turn });
+    } else {
+      newState.gameOver = true;
+      newLog.push({ text: '💀 You have perished in the Undergrowth...', type: 'death', turn });
+    }
   }
 
   return {
@@ -885,7 +909,7 @@ export function useItem(state: GameState, inventoryIdx: number): GameState {
           ]);
           if (pos) {
             player.pos = pos;
-            computeFOV(newState.floor, pos.x, pos.y);
+            computeFOV(newState.floor, pos.x, pos.y, getViewRadius());
             log.push({ text: `Used ${def.icon} ${def.name}. Teleported!`, type: 'pickup', turn });
           }
           break;
@@ -1036,7 +1060,7 @@ export function useItem(state: GameState, inventoryIdx: number): GameState {
             }
             if (telePos) {
               player.pos = telePos;
-              computeFOV(newState.floor, telePos.x, telePos.y);
+              computeFOV(newState.floor, telePos.x, telePos.y, getViewRadius());
             }
             // Deal massive backstab damage
             const dmg = 30 + rngInt(0, 15);
@@ -1177,7 +1201,7 @@ export function descendFloor(state: GameState): GameState {
   const startRoom = newFloor.rooms[0];
   const playerPos = { x: startRoom.centerX, y: startRoom.centerY };
 
-  computeFOV(newFloor, playerPos.x, playerPos.y);
+  computeFOV(newFloor, playerPos.x, playerPos.y, getViewRadius());
 
   const enemies = spawnEnemies(newFloor, nextFloorNum, [playerPos]);
   const items = spawnItems(newFloor, nextFloorNum, [playerPos, ...enemies.map(e => e.pos)]);
