@@ -1950,3 +1950,11 @@ button, .btn, [role="button"] {
   color: #fbbf24 !important;
   animation: stairs-blink 1.5s ease-in-out infinite;
 }
+
+/* Death cause on game over screen */
+.death-cause {
+  color: #ef4444 !important;
+  font-size: 11px !important;
+  margin-bottom: 4px;
+  text-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
+}

@@ -37,6 +37,13 @@ export function invalidateMetaCache(): void {
   _metaCacheTurn = -1;
 }
 
+// --- Track last damage source for death message ---
+let _lastDamageSource: string = 'the Undergrowth';
+
+export function getLastDamageSource(): string {
+  return _lastDamageSource;
+}
+
 // --- Floating damage number events (ephemeral, not saved) ---
 let _damageEvents: DamageEvent[] = [];
 let _damageEventId = 0;
@@ -669,6 +676,7 @@ function finalizeTurn(state: GameState, log: LogEntry[]): GameState {
   if (lavaDmg > 0) {
     newState.player = { ...newState.player, hp: newState.player.hp - lavaDmg };
     addDamageEvent(pPos.x, pPos.y, `-${lavaDmg}`, '#f97316');
+    _lastDamageSource = 'Lava';
     newLog.push({ text: '🔥 The nearby lava scorches you! (-1 HP)', type: 'combat', turn });
   }
 
@@ -779,6 +787,7 @@ function processEnemyTurns(state: GameState, log: LogEntry[], turn: number): Gam
         newState.player = { ...newState.player, hp: newState.player.hp - rawDmg };
         if (rawDmg > 0) {
           addDamageEvent(newState.player.pos.x, newState.player.pos.y, `-${rawDmg}`, '#ef4444');
+          _lastDamageSource = def.name;
           log.push({
             text: `${def.icon} ${def.name} hits you for ${rawDmg} damage!`,
             type: 'combat',
@@ -893,6 +902,8 @@ function useEnemyAbility(
     case 'ranged_attack': {
       const dmg = Math.max(1, ability.value + rngInt(-2, 2));
       const newPlayer = { ...state.player, hp: state.player.hp - dmg };
+      addDamageEvent(state.player.pos.x, state.player.pos.y, `-${dmg}`, '#ef4444');
+      _lastDamageSource = `${def?.name || 'Enemy'}'s ${ability.name}`;
       log.push({ text: `${eName} uses ${ability.name}! ${dmg} damage!`, type: 'combat', turn });
       return { state: { ...state, player: newPlayer } };
     }
@@ -901,6 +912,8 @@ function useEnemyAbility(
       if (dist <= (ability.range || 2)) {
         const dmg = Math.max(1, ability.value + rngInt(-2, 2));
         const newPlayer = { ...state.player, hp: state.player.hp - dmg };
+        addDamageEvent(state.player.pos.x, state.player.pos.y, `-${dmg}`, '#ef4444');
+        _lastDamageSource = `${def?.name || 'Enemy'}'s ${ability.name}`;
         log.push({ text: `${eName} uses ${ability.name}! AOE blast for ${dmg} damage!`, type: 'combat', turn });
         return { state: { ...state, player: newPlayer } };
       }
@@ -971,6 +984,7 @@ function processStatusEffects(state: GameState, log: LogEntry[], turn: number): 
     switch (effect.type) {
       case 'poison':
         player.hp -= effect.value;
+        _lastDamageSource = 'Poison';
         log.push({ text: `☠️ Poison deals ${effect.value} damage!`, type: 'combat', turn });
         break;
       case 'regen': {

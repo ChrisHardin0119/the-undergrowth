@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { GameState, Tile, Direction, MetaProgression, BiomeType, Achievement } from '@/lib/types';
-import { createNewGame, processAction, useItem, dropItem, getEffectiveStats, calculateScore, consumeDamageEvents } from '@/lib/gameEngine';
+import { createNewGame, processAction, useItem, dropItem, getEffectiveStats, calculateScore, consumeDamageEvents, getLastDamageSource } from '@/lib/gameEngine';
 import { DamageEvent } from '@/lib/types';
 import { getEnemyDef, getItemDef } from '@/lib/entities';
 import { getBiomeForFloor, getBiomeCSS } from '@/lib/biomes';
@@ -209,6 +209,11 @@ export default function GamePage() {
           // Check for level up
           if (newState.player.level > gameState.player.level) {
             sfxLevelUp();
+          }
+
+          // Check for floor change (descent)
+          if (newState.floorNumber > gameState.floorNumber) {
+            sfxDescend();
           }
 
           // Check for movement
@@ -1058,6 +1063,9 @@ export default function GamePage() {
         </div>
 
         <div className="gameover-stats">
+          {!gameState.victory && (
+            <div className="stat-line death-cause">Slain by: {getLastDamageSource()}</div>
+          )}
           <div className="stat-line">Score: {finalScore}</div>
           <div className="stat-line">Floor: {gameState.deepestFloor}/30</div>
           <div className="stat-line">Level: {gameState.player.level}</div>
