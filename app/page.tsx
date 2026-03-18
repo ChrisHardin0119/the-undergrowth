@@ -69,7 +69,9 @@ export default function GamePage() {
   const [newlyUnlockedAchievements, setNewlyUnlockedAchievements] = useState<Achievement[]>([]);
   const [showMinimap, setShowMinimap] = useState(false);
   const [damageEvents, setDamageEvents] = useState<DamageEvent[]>([]);
+  const [screenShake, setScreenShake] = useState(false);
   const damageTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shakeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Helper to collect damage events after a game action
   const collectDamageEvents = () => {
@@ -193,6 +195,10 @@ export default function GamePage() {
           // Check for damage taken
           if (newState.player.hp < gameState.player.hp) {
             sfxPlayerHurt();
+            // Trigger screen shake
+            setScreenShake(true);
+            if (shakeTimerRef.current) clearTimeout(shakeTimerRef.current);
+            shakeTimerRef.current = setTimeout(() => setScreenShake(false), 250);
           }
 
           // Check for items picked up
@@ -286,7 +292,12 @@ export default function GamePage() {
     collectDamageEvents();
 
     if (soundEnabled) {
-      if (newState.player.hp < gameState.player.hp) sfxPlayerHurt();
+      if (newState.player.hp < gameState.player.hp) {
+        sfxPlayerHurt();
+        setScreenShake(true);
+        if (shakeTimerRef.current) clearTimeout(shakeTimerRef.current);
+        shakeTimerRef.current = setTimeout(() => setScreenShake(false), 250);
+      }
       if (newState.player.inventory.length > gameState.player.inventory.length) sfxPickup();
       if (newState.player.level > gameState.player.level) sfxLevelUp();
       if ((newState.player.pos.x !== gameState.player.pos.x || newState.player.pos.y !== gameState.player.pos.y) && dir !== 'wait') sfxStep();
@@ -581,7 +592,7 @@ export default function GamePage() {
         </div>
 
         <div className="game-main">
-          <div className="viewport-wrapper">
+          <div className={`viewport-wrapper${screenShake ? ' shake' : ''}`}>
             <div className="viewport" style={{ gridTemplateColumns: `repeat(${VIEWPORT_W}, 1fr)` }}>{tileGrid}</div>
             {/* Floating damage numbers */}
             {damageEvents.map(evt => {

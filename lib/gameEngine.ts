@@ -651,6 +651,27 @@ function finalizeTurn(state: GameState, log: LogEntry[]): GameState {
   // Process status effects
   newState = processStatusEffects(newState, newLog, turn);
 
+  // Environmental hazards: lava proximity damage
+  const pPos = newState.player.pos;
+  let lavaDmg = 0;
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      if (dx === 0 && dy === 0) continue;
+      const lx = pPos.x + dx;
+      const ly = pPos.y + dy;
+      if (inBounds(lx, ly, newState.floor) && newState.floor.tiles[ly][lx] === Tile.Lava) {
+        lavaDmg = 1; // only 1 damage total regardless of how many lava tiles
+        break;
+      }
+    }
+    if (lavaDmg > 0) break;
+  }
+  if (lavaDmg > 0) {
+    newState.player = { ...newState.player, hp: newState.player.hp - lavaDmg };
+    addDamageEvent(pPos.x, pPos.y, `-${lavaDmg}`, '#f97316');
+    newLog.push({ text: '🔥 The nearby lava scorches you! (-1 HP)', type: 'combat', turn });
+  }
+
   // Check player death
   if (newState.player.hp <= 0) {
     // Second Wind: chance to survive killing blow
@@ -763,6 +784,27 @@ function processEnemyTurns(state: GameState, log: LogEntry[], turn: number): Gam
             type: 'combat',
             turn,
           });
+
+          // Poison-on-hit enemies (chance-based)
+          const poisonEnemies: Record<string, number> = {
+            'acid_slug': 0.5,    // 50% chance
+            'toxic_toadstool': 0.4,
+            'spore_cloud': 0.3,
+            'cave_spider': 0.25,
+            'vine_strangler': 0.2,
+          };
+          const poisonChance = poisonEnemies[enemy.defId] || 0;
+          if (poisonChance > 0 && rng() < poisonChance) {
+            const alreadyPoisoned = newState.player.statusEffects.some(e => e.type === 'poison');
+            if (!alreadyPoisoned) {
+              newState.player = {
+                ...newState.player,
+                statusEffects: [...newState.player.statusEffects, { type: 'poison', turnsLeft: 5, value: 2 }],
+              };
+              addDamageEvent(newState.player.pos.x, newState.player.pos.y, 'POISON!', '#a855f7');
+              log.push({ text: `☠️ ${def.name}'s attack poisons you!`, type: 'combat', turn });
+            }
+          }
         }
       }
     } else if (canSeePlayer && (def.behavior === 'chase' || def.behavior === 'boss')) {

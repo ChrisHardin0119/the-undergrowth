@@ -1930,6 +1930,19 @@ button, .btn, [role="button"] {
   transition: width 0.2s ease;
 }
 
+/* Screen shake animation for damage */
+.viewport-wrapper.shake {
+  animation: screen-shake 0.2s ease-out;
+}
+
+@keyframes screen-shake {
+  0% { transform: translate(0, 0); }
+  25% { transform: translate(-2px, 1px); }
+  50% { transform: translate(2px, -1px); }
+  75% { transform: translate(-1px, 2px); }
+  100% { transform: translate(0, 0); }
+}
+
 /* Stairs descent button in action bar */
 .stairs-action-btn {
   background: rgba(255, 255, 0, 0.15) !important;
