@@ -65,7 +65,7 @@ body {
   flex-direction: column;
   outline: none;
   position: relative;
-  overflow: hidden;
+  overflow-y: auto;
   /* Biome defaults (will be overridden by inline styles in JSX) */
   --biome-wall: #0a1612;
   --biome-floor: #080e0c;
@@ -1973,9 +1973,11 @@ button, .btn, [role="button"] {
 .screen {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  min-height: 0;
+  flex: 1;
   padding: 20px;
   animation: fadeIn 0.5s ease-in;
+  overflow-y: auto;
 }
 
 .screen h1 {
@@ -2024,6 +2026,7 @@ button, .btn, [role="button"] {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
 }
 
 .screen-inventory {
