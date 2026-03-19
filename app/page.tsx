@@ -8,6 +8,7 @@ import { getEnemyDef, getItemDef } from '@/lib/entities';
 import { getBiomeForFloor, getBiomeCSS } from '@/lib/biomes';
 import { loadMeta, saveMeta, checkAchievements, calculateSoulsEarned, META_UPGRADES, PLAYER_CLASSES, ACHIEVEMENTS, getUpgradeCost, unlockClass } from '@/lib/meta';
 import { initAudio, sfxStep, sfxHit, sfxPlayerHurt, sfxPickup, sfxLevelUp, sfxDeath, sfxDescend, sfxBoss, sfxVictory, sfxUseItem, startAmbient, stopAmbient } from '@/lib/audio';
+import { getEnemySprite, getClassSprite, getItemTypeSprite, TILE_SPRITES } from '@/lib/sprites';
 
 type ScreenType = 'menu' | 'class_select' | 'game' | 'inventory' | 'soul_shop' | 'achievements' | 'help' | 'gameover';
 
@@ -19,8 +20,8 @@ interface HighScoreEntry {
   turns: number;
 }
 
-const VIEWPORT_W = 21;
-const VIEWPORT_H = 15;
+const VIEWPORT_W = 15;
+const VIEWPORT_H = 11;
 const MAX_HIGH_SCORES = 10;
 
 function getTileChar(tile: Tile): string {
@@ -462,7 +463,7 @@ export default function GamePage() {
         const enemy = isVisible ? enemies.find(e => e.pos.x === wx && e.pos.y === wy && e.hp > 0) : null;
         const item = isVisible ? items.find(i => i.pos && i.pos.x === wx && i.pos.y === wy) : null;
 
-        let content = '';
+        let content: React.ReactNode = '';
         let tileClass = 'tile';
 
         if (!isExplored) {
@@ -472,19 +473,23 @@ export default function GamePage() {
           content = getTileChar(tile);
         } else if (isPlayer) {
           tileClass += ' tile-player';
-          const classObj = PLAYER_CLASSES.find(c => c.id === gameState.classId);
-          content = classObj?.icon || '🧙';
+          const spriteSrc = getClassSprite(gameState.classId);
+          tileGrid.push(
+            <div key={`${vx}-${vy}`} className={tileClass}>
+              <img src={spriteSrc} className="sprite" alt="" draggable={false} />
+            </div>
+          );
+          continue;
         } else if (enemy) {
           const eDef = getEnemyDef(enemy.defId);
           tileClass += ' tile-enemy';
-          content = eDef?.icon || '?';
           if (eDef?.isBoss) tileClass += ' tile-boss';
-          // Enemy HP bar shown below
           const eHpPct = Math.max(0, Math.min(100, (enemy.hp / enemy.maxHp) * 100));
           const eHpColor = eHpPct > 60 ? '#ef4444' : eHpPct > 30 ? '#f97316' : '#fbbf24';
+          const spriteSrc = getEnemySprite(enemy.defId);
           tileGrid.push(
             <div key={`${vx}-${vy}`} className={tileClass}>
-              {content}
+              <img src={spriteSrc} className="sprite" alt="" draggable={false} />
               <div className="enemy-hp-bar">
                 <div className="enemy-hp-fill" style={{ width: `${eHpPct}%`, backgroundColor: eHpColor }} />
               </div>
@@ -494,7 +499,37 @@ export default function GamePage() {
         } else if (item) {
           const iDef = getItemDef(item.defId);
           tileClass += ' tile-item';
-          content = iDef?.icon || '?';
+          const spriteSrc = iDef ? getItemTypeSprite(iDef.type) : '/sprites/frames/flask_red.png';
+          tileGrid.push(
+            <div key={`${vx}-${vy}`} className={tileClass}>
+              <img src={spriteSrc} className="sprite" alt="" draggable={false} />
+            </div>
+          );
+          continue;
+        } else if (tile === Tile.StairsDown) {
+          tileClass += ' tile-stairs';
+          tileGrid.push(
+            <div key={`${vx}-${vy}`} className={tileClass}>
+              <img src={TILE_SPRITES.stairs} className="sprite" alt="" draggable={false} />
+            </div>
+          );
+          continue;
+        } else if (tile === Tile.Door) {
+          tileClass += ' tile-door';
+          tileGrid.push(
+            <div key={`${vx}-${vy}`} className={tileClass}>
+              <img src={TILE_SPRITES.door} className="sprite" alt="" draggable={false} />
+            </div>
+          );
+          continue;
+        } else if (tile === Tile.Chest) {
+          tileClass += ' tile-chest';
+          tileGrid.push(
+            <div key={`${vx}-${vy}`} className={tileClass}>
+              <img src={TILE_SPRITES.chest} className="sprite" alt="" draggable={false} />
+            </div>
+          );
+          continue;
         } else {
           tileClass += ` ${getTileClass(tile)}`;
           content = getTileChar(tile);
